@@ -5,6 +5,7 @@ mod cursor;
 mod hand;
 mod hook;
 mod log;
+mod monitor;
 mod prefs;
 mod renderer;
 mod scene;

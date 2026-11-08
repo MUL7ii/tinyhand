@@ -147,7 +147,7 @@ fn halve(src: &Pixmap) -> Pixmap {
     out
 }
 
-fn resized(full: &Pixmap, height: u32) -> Pixmap {
+pub fn resized(full: &Pixmap, height: u32) -> Pixmap {
     let mut cur = full.clone();
     while cur.height() / 2 >= height && cur.width() >= 2 {
         cur = halve(&cur);

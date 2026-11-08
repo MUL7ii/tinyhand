@@ -6,7 +6,6 @@ use std::time::Instant;
 use tiny_skia::PixmapMut;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::DwmFlush;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW};
 
@@ -56,14 +55,8 @@ fn cursor_pos() -> (f32, f32) {
     (p.x as f32, p.y as f32)
 }
 
-/// The monitor under a point, in virtual-desktop pixels.
 fn monitor_rect(at: (f32, f32)) -> RECT {
-    unsafe {
-        let monitor = MonitorFromPoint(POINT { x: at.0 as i32, y: at.1 as i32 }, MONITOR_DEFAULTTONEAREST);
-        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = GetMonitorInfoW(monitor, &mut info);
-        info.rcMonitor
-    }
+    crate::monitor::at(at).full
 }
 
 impl Renderer {

@@ -2,7 +2,6 @@ use std::time::Instant;
 
 use tiny_skia::*;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -43,9 +42,13 @@ enum Kind {
 
 struct Item {
     kind: Kind,
+    /// Large copy of the thumbnail, kept so icons can be resized for any display scaling.
+    source: Option<Pixmap>,
     icon: Option<Pixmap>,
     x: f32,
 }
+
+const SOURCE_PX: u32 = 144;
 
 pub struct Toolbar {
     pub hwnd: HWND,
@@ -90,36 +93,19 @@ fn fill(pix: &mut PixmapMut, path: &Path, color: Color) {
 impl Toolbar {
     pub fn new(hwnd: HWND, styles: &[&str], selected: &str) -> Self {
         let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
-        let icon_px = (36.0 * scale).round() as u32;
         let mut items: Vec<Item> = styles
             .iter()
-            .map(|id| Item {
-                kind: Kind::Style(id.to_string()),
-                icon: HandAsset::load(id).map(|a| a.thumbnail(icon_px)),
-                x: 0.0,
-            })
+            .map(|id| Item { kind: Kind::Style(id.to_string()), source: HandAsset::load(id).map(|a| a.thumbnail(SOURCE_PX)), icon: None, x: 0.0 })
             .collect();
-        let mut x = PAD_X * scale;
-        for item in &mut items {
-            item.x = x;
-            x += (BUTTON + GAP) * scale;
+        for kind in [Kind::ClickThrough, Kind::Sound, Kind::Exit] {
+            items.push(Item { kind, source: None, icon: None, x: 0.0 });
         }
-        let divider_x = x;
-        x += (1.0 + GAP) * scale;
-        items.push(Item { kind: Kind::ClickThrough, icon: None, x });
-        x += (BUTTON + GAP) * scale;
-        items.push(Item { kind: Kind::Sound, icon: None, x });
-        x += (BUTTON + GAP) * scale;
-        items.push(Item { kind: Kind::Exit, icon: None, x });
-        x += (BUTTON + PAD_X) * scale;
-
-        let (w, h) = (x.round() as i32, ((BUTTON + 2.0 * PAD_Y) * scale).round() as i32);
-        Self {
+        let mut bar = Self {
             hwnd,
             items,
-            divider_x,
-            surface: Surface::new(w, h),
-            scale,
+            divider_x: 0.0,
+            surface: Surface::new(1, 1),
+            scale: 0.0,
             selected: selected.to_string(),
             through: false,
             sound: true,
@@ -129,7 +115,31 @@ impl Toolbar {
             last: Instant::now(),
             tracking: false,
             frame: RECT::default(),
+        };
+        bar.layout(scale);
+        bar
+    }
+
+    /// Sizes and positions everything for a display scaling. Called again when the toolbar
+    /// moves to a monitor with a different one.
+    fn layout(&mut self, scale: f32) {
+        self.scale = scale;
+        let icon_px = (36.0 * scale).round() as u32;
+        let styles = self.items.iter().filter(|i| matches!(i.kind, Kind::Style(_))).count();
+        let mut x = PAD_X * scale;
+        for (i, item) in self.items.iter_mut().enumerate() {
+            if i == styles {
+                self.divider_x = x;
+                x += (1.0 + GAP) * scale;
+            }
+            item.icon = item.source.as_ref().map(|s| crate::hand::resized(s, icon_px));
+            item.x = x;
+            x += (BUTTON + GAP) * scale;
         }
+        x += (PAD_X - GAP) * scale;
+        let (w, h) = (x.round() as i32, ((BUTTON + 2.0 * PAD_Y) * scale).round() as i32);
+        self.surface = Surface::new(w, h);
+        self.hover = None;
     }
 
     fn size(&self) -> (i32, i32) {
@@ -138,23 +148,28 @@ impl Toolbar {
 
     /// Moves to the monitor the cursor is on, without changing whether it is showing.
     pub fn follow_cursor(&mut self) {
-        self.place();
-        self.present();
+        if self.place() {
+            self.paint();
+        } else {
+            self.present();
+        }
         if self.target > 0.0 {
             self.set_interactive(true);
         }
     }
 
-    fn place(&mut self) {
-        let mut work = RECT::default();
+    /// Puts the toolbar at the bottom of the cursor's monitor. Returns true if that monitor's
+    /// display scaling differed, in which case the toolbar was rebuilt and needs repainting.
+    fn place(&mut self) -> bool {
+        let mut at = POINT::default();
         unsafe {
-            let mut at = POINT::default();
             let _ = GetCursorPos(&mut at);
-            let monitor = MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST);
-            let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-            if GetMonitorInfoW(monitor, &mut info).as_bool() {
-                work = info.rcWork;
-            }
+        }
+        let monitor = crate::monitor::at((at.x as f32, at.y as f32));
+        let work = monitor.work;
+        let rescaled = (monitor.scale - self.scale).abs() > 0.01;
+        if rescaled {
+            self.layout(monitor.scale);
         }
         let (w, h) = self.size();
         let left = work.left + (work.right - work.left - w) / 2;
@@ -167,6 +182,7 @@ impl Toolbar {
             right: left + w + (80.0 * s) as i32,
             bottom: top + h + (10.0 * s) as i32,
         });
+        rescaled
     }
 
     pub fn show(&mut self) {
