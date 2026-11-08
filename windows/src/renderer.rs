@@ -161,7 +161,7 @@ impl Renderer {
         if let Some(mut pix) = PixmapMut::from_bytes(self.surface.bytes_mut(), w as u32, h as u32) {
             draw_laser(&mut pix, at, r);
         }
-        self.surface.present_rect(self.hwnd, RECT { left: d.l, top: d.t, right: d.r, bottom: d.b });
+        self.surface.present(self.hwnd);
     }
 }
 
@@ -180,7 +180,8 @@ pub fn run(shared: Arc<Mutex<Renderer>>) {
             hook::wait(INFINITE);
             continue;
         }
-        match lock(&shared).frame() {
+        let next = lock(&shared).frame();
+        match next {
             Next::Frame => unsafe {
                 let _ = DwmFlush();
             },

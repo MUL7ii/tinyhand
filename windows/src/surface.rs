@@ -59,24 +59,12 @@ impl Surface {
         }
     }
 
-    /// Content only, so it is safe from any thread.
-    pub fn present_rect(&self, hwnd: HWND, dirty: RECT) {
+    /// Content only (no move or resize), so it is safe from any thread.
+    /// prcDirty via UpdateLayeredWindowIndirect did not update the screen here.
+    pub fn present(&self, hwnd: HWND) {
         let origin = POINT::default();
-        let blend = Self::blend();
-        let info = UPDATELAYEREDWINDOWINFO {
-            cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
-            hdcDst: HDC::default(),
-            pptDst: std::ptr::null(),
-            psize: std::ptr::null(),
-            hdcSrc: self.dc,
-            pptSrc: &origin,
-            crKey: COLORREF(0),
-            pblend: &blend,
-            dwFlags: ULW_ALPHA,
-            prcDirty: &dirty,
-        };
         unsafe {
-            let _ = UpdateLayeredWindowIndirect(hwnd, &info);
+            let _ = UpdateLayeredWindow(hwnd, None, None, None, Some(self.dc), Some(&origin), COLORREF(0), Some(&Self::blend()), ULW_ALPHA);
         }
     }
 }
