@@ -47,7 +47,21 @@ impl Surface {
     }
 
     fn blend() -> BLENDFUNCTION {
-        BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 }
+        Self::blend_with(255)
+    }
+
+    fn blend_with(alpha: u8) -> BLENDFUNCTION {
+        BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 }
+    }
+
+    /// Places the window at (x, y) with the whole surface at the given opacity.
+    pub fn present_at(&self, hwnd: HWND, x: i32, y: i32, alpha: u8) {
+        let origin = POINT::default();
+        let at = POINT { x, y };
+        let size = SIZE { cx: self.w, cy: self.h };
+        unsafe {
+            let _ = UpdateLayeredWindow(hwnd, None, Some(&at), Some(&size), Some(self.dc), Some(&origin), COLORREF(0), Some(&Self::blend_with(alpha)), ULW_ALPHA);
+        }
     }
 
     /// Window thread only.

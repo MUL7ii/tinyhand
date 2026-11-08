@@ -21,7 +21,20 @@ pub static DOWN_Y: AtomicI32 = AtomicI32::new(0);
 
 static WAKE: AtomicIsize = AtomicIsize::new(0);
 static SWALLOWED: AtomicBool = AtomicBool::new(false);
-static PASS: [AtomicI32; 4] = [const { AtomicI32::new(0) }; 4];
+/// Clicks inside these rects reach the windows under the overlay: taskbar, toolbar.
+static PASS: [[AtomicI32; 4]; 2] = [const { [const { AtomicI32::new(0) }; 4] }; 2];
+/// Cursor zone that reveals the toolbar.
+pub static ZONE: [AtomicI32; 4] = [const { AtomicI32::new(0) }; 4];
+
+pub fn set_zone(r: RECT) {
+    for (slot, v) in ZONE.iter().zip([r.left, r.top, r.right, r.bottom]) {
+        slot.store(v, Relaxed);
+    }
+}
+
+pub fn in_zone(x: i32, y: i32) -> bool {
+    x >= ZONE[0].load(Relaxed) && y >= ZONE[1].load(Relaxed) && x < ZONE[2].load(Relaxed) && y < ZONE[3].load(Relaxed)
+}
 
 pub fn init() {
     let event = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }.expect("wake event");
@@ -44,14 +57,14 @@ pub fn wait(ms: u32) {
     }
 }
 
-pub fn set_passthrough(r: RECT) {
-    for (slot, v) in PASS.iter().zip([r.left, r.top, r.right, r.bottom]) {
+pub fn set_passthrough(index: usize, r: RECT) {
+    for (slot, v) in PASS[index].iter().zip([r.left, r.top, r.right, r.bottom]) {
         slot.store(v, Relaxed);
     }
 }
 
 fn in_passthrough(p: POINT) -> bool {
-    p.x >= PASS[0].load(Relaxed) && p.y >= PASS[1].load(Relaxed) && p.x < PASS[2].load(Relaxed) && p.y < PASS[3].load(Relaxed)
+    PASS.iter().any(|r| p.x >= r[0].load(Relaxed) && p.y >= r[1].load(Relaxed) && p.x < r[2].load(Relaxed) && p.y < r[3].load(Relaxed))
 }
 
 unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {

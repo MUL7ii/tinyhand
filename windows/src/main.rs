@@ -4,10 +4,12 @@ mod arm;
 mod cursor;
 mod hand;
 mod hook;
+mod prefs;
 mod renderer;
 mod scene;
 mod styles;
 mod surface;
+mod toolbar;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -28,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 use renderer::{Renderer, lock};
+use toolbar::{Action, Toolbar};
 
 const TIMER_TASKBAR: usize = 1;
 const HK_TOGGLE: i32 = 1;
@@ -39,12 +42,20 @@ const CMD_QUIT: usize = 2;
 
 static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 
+const TIMER_INITIAL: usize = 3;
+const PINNED: [&str; 6] = ["lavender", "glove", "coral", "plush", "robot", "laser"];
+
 struct App {
     hwnd: HWND,
     renderer: Arc<Mutex<Renderer>>,
+    toolbar: Toolbar,
     active: bool,
     /// A capture tool has focus. TinyHand steps aside until it leaves.
     suspended: bool,
+    /// Cursor is in the toolbar's reveal zone.
+    near: bool,
+    /// The toolbar shows for a few seconds after turning on.
+    initial: bool,
 }
 
 const YIELD_TO: [&str; 3] = ["screenclippinghost.exe", "snippingtool.exe", "screensketch.exe"];
@@ -134,8 +145,21 @@ impl App {
         unsafe {
             let _ = RegisterHotKey(Some(self.hwnd), HK_ESC, MOD_NOREPEAT, VK_ESCAPE.0 as u32);
             SetTimer(Some(self.hwnd), TIMER_TASKBAR, 500, None);
+            SetTimer(Some(self.hwnd), TIMER_INITIAL, 3000, None);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
+        self.near = false;
+        self.initial = true;
+        self.toolbar.show();
+        self.toolbar.set_wanted(true);
+        hook::wake();
+    }
+
+    fn pick(&mut self, id: &str) {
+        let (style, ink) = styles::load(id);
+        lock(&self.renderer).set_style(style, ink);
+        self.toolbar.select(id);
+        prefs::save_style(id);
         hook::wake();
     }
 
@@ -144,8 +168,10 @@ impl App {
         hook::HELD.store(false, Relaxed);
         cursor::restore();
         lock(&self.renderer).reset();
+        self.toolbar.hide();
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_TASKBAR);
+            let _ = KillTimer(Some(self.hwnd), TIMER_INITIAL);
             let _ = UnregisterHotKey(Some(self.hwnd), HK_ESC);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -158,12 +184,34 @@ impl App {
                 let _ = GetWindowRect(bar, &mut r);
             }
         }
-        hook::set_passthrough(r);
+        hook::set_passthrough(0, r);
     }
 
     fn on_message(&mut self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        if hwnd == self.toolbar.hwnd {
+            let (result, action) = self.toolbar.handle(msg, wp, lp)?;
+            match action {
+                Some(Action::Pick(id)) => self.pick(&id),
+                Some(Action::Exit) => self.deactivate(),
+                None => {}
+            }
+            return Some(result);
+        }
         match msg {
+            WM_TIMER if wp.0 == TIMER_INITIAL => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_INITIAL);
+                }
+                self.initial = false;
+                self.toolbar.set_wanted(self.near);
+            }
             WM_TIMER => self.refresh_taskbar(),
+            toolbar::WM_TB_WANT => {
+                self.near = wp.0 != 0;
+                if self.active && !self.suspended {
+                    self.toolbar.set_wanted(self.near || self.initial);
+                }
+            }
             hook::WM_PRESENT => {
                 hook::PRESENT_PENDING.store(false, Relaxed);
                 if self.active {
@@ -292,10 +340,41 @@ fn main() {
         let off = BOOL(1);
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, (&raw const off).cast(), size_of::<BOOL>() as u32);
 
-        let id = std::env::args().nth(1).unwrap_or_else(|| "lavender".into());
+        let bar_class = w!("TinyHandToolbar");
+        RegisterClassExW(&WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinst,
+            lpszClassName: bar_class,
+            ..Default::default()
+        });
+        let bar = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            bar_class,
+            w!("TinyHand toolbar"),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            Some(hinst),
+            None,
+        )
+        .expect("toolbar window");
+        let _ = DwmSetWindowAttribute(bar, DWMWA_TRANSITIONS_FORCEDISABLED, (&raw const off).cast(), size_of::<BOOL>() as u32);
+
+        let id = std::env::args().nth(1).or_else(prefs::load_style).unwrap_or_else(|| "lavender".into());
         let (style, ink) = styles::load(&id);
+        let mut pinned = PINNED.to_vec();
+        if !pinned.contains(&id.as_str()) {
+            pinned.insert(pinned.len() - 1, &id);
+        }
+        let toolbar = Toolbar::new(bar, &pinned, &id);
         let renderer = Arc::new(Mutex::new(Renderer::new(hwnd, w, h, style, ink)));
-        APP.with(|a| *a.borrow_mut() = Some(App { hwnd, renderer: renderer.clone(), active: false, suspended: false }));
+        let app = App { hwnd, renderer: renderer.clone(), toolbar, active: false, suspended: false, near: false, initial: false };
+        APP.with(|a| *a.borrow_mut() = Some(app));
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT);
         hook::init();
         hook::start();

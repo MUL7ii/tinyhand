@@ -32,9 +32,26 @@ pub struct HandAsset {
     pub rod_end: f32,
     pub tip_x: f32,
     pub rod_x: f32,
+    min_x: f32,
+    max_x: f32,
 }
 
 impl HandAsset {
+    /// Square crop of just the hand, for toolbar buttons.
+    pub fn thumbnail(&self, px: u32) -> Pixmap {
+        let (w, h) = (self.full.width() as f32, self.full.height() as f32);
+        let side = ((self.max_x - self.min_x) * w).max((self.wrist - self.hand_top) * h) * 1.06;
+        let (cx, cy) = ((self.min_x + self.max_x) / 2.0 * w, (self.hand_top + self.wrist) / 2.0 * h);
+        let scale = px as f32 / side;
+        let small = resized(&self.full, ((h * scale).round() as u32).max(1));
+        let k = small.height() as f32 / h;
+        let mut out = Pixmap::new(px, px).expect("thumbnail");
+        let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
+        let ts = Transform::from_translate(px as f32 / 2.0 - cx * k, px as f32 / 2.0 - cy * k);
+        out.draw_pixmap(0, 0, small.as_ref(), &paint, ts, None);
+        out
+    }
+
     pub fn load(id: &str) -> Option<Self> {
         let mut full = Pixmap::load_png(find(&format!("hand_{id}"))?).ok()?;
         swap_rb(&mut full);
@@ -54,7 +71,7 @@ impl HandAsset {
     }
 
     fn blank(full: Pixmap) -> Self {
-        Self { display: full.clone(), full, aspect: 0.0, hand_top: 0.0, tip: 0.0, wrist: 0.0, rod_end: 0.0, tip_x: 0.5, rod_x: 0.5 }
+        Self { display: full.clone(), full, aspect: 0.0, hand_top: 0.0, tip: 0.0, wrist: 0.0, rod_end: 0.0, tip_x: 0.5, rod_x: 0.5, min_x: 0.0, max_x: 1.0 }
     }
 }
 
@@ -94,6 +111,9 @@ fn measure(p: &Pixmap) -> Option<HandAsset> {
     asset.rod_end = rod_end as f32 / fh;
     asset.tip_x = center((h - 1).min(top + h / 200));
     asset.rod_x = center((wrist + rod_end) / 2);
+    let xs = || (top..wrist).flat_map(|y| (0..w).filter(move |&x| solid(x, y)));
+    asset.min_x = xs().min().unwrap_or(0) as f32 / w as f32;
+    asset.max_x = xs().max().unwrap_or(w - 1) as f32 / w as f32;
     Some(asset)
 }
 

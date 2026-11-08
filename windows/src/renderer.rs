@@ -12,6 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW};
 use crate::hook;
 use crate::scene::{Ink, Pending, Rc, draw_laser, union_opt};
 use crate::styles::Style;
+use crate::toolbar::WM_TB_WANT;
 use crate::surface::Surface;
 
 const DRAG_THRESHOLD: f32 = 4.0;
@@ -39,6 +40,7 @@ pub struct Renderer {
     up_seq: u32,
     last: Instant,
     drew: bool,
+    near_toolbar: bool,
 }
 
 // The raw HWND and DIB pointer are only used behind the mutex.
@@ -71,11 +73,19 @@ impl Renderer {
             up_seq: 0,
             last: Instant::now(),
             drew: false,
+            near_toolbar: false,
         }
+    }
+
+    pub fn set_style(&mut self, style: Style, ink_rgb: u32) {
+        self.style = style;
+        self.ink.set_color(ink_rgb);
+        self.key.clear();
     }
 
     /// Blank slate and an empty frame. Window thread only.
     pub fn reset(&mut self) {
+        self.near_toolbar = false;
         self.surface.clear();
         self.ink.clear();
         self.ink.take_dirty();
@@ -133,6 +143,14 @@ impl Renderer {
             self.press = 0.0;
         }
         busy |= self.ink.tick();
+
+        let near = !self.ink.is_drawing() && hook::in_zone(at.0 as i32, at.1 as i32);
+        if near != self.near_toolbar {
+            self.near_toolbar = near;
+            unsafe {
+                let _ = PostMessageW(Some(self.hwnd), WM_TB_WANT, WPARAM(near as usize), LPARAM(0));
+            }
+        }
 
         busy |= self.draw(at, dt);
 
