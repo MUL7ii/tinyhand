@@ -87,7 +87,26 @@ fn mouse_input(flags: MOUSE_EVENT_FLAGS) -> INPUT {
     }
 }
 
+/// Injecting input from inside a hook callback stalls the whole input system until Windows
+/// times the hook out, so the hook only posts these and the window thread does the work.
+pub const WM_REPLAY_CLICK: u32 = WM_APP + 5;
+pub const WM_REPLAY_KEY: u32 = WM_APP + 6;
+
+fn post_to_window(msg: u32, wp: usize, lp: isize) {
+    let hwnd = HWND(TARGET.load(Relaxed) as *mut c_void);
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), msg, WPARAM(wp), LPARAM(lp));
+    }
+}
+
 fn replay_click(x: i32, y: i32, button: i32) {
+    let packed = ((y as i16 as u16 as isize) << 16) | (x as i16 as u16 as isize);
+    post_to_window(WM_REPLAY_CLICK, button as usize, packed);
+}
+
+/// Window thread only.
+pub fn send_click(lp: LPARAM, button: usize) {
+    let (x, y) = ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
     let (down, up) = match button {
         0 => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
         1 => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
@@ -96,6 +115,15 @@ fn replay_click(x: i32, y: i32, button: i32) {
     unsafe {
         let _ = SetCursorPos(x, y);
         SendInput(&[mouse_input(down), mouse_input(up)], size_of::<INPUT>() as i32);
+    }
+}
+
+/// Window thread only. Gives the app its Alt back, then the key, in order.
+pub fn send_alt_and_key(vk: usize, lp: LPARAM) {
+    let (scan, extended) = ((lp.0 & 0xFFFF) as u32, (lp.0 >> 16) & 1 != 0);
+    let inputs = [key_input(VK_MENU.0 as u32, 0, false), key_input(vk as u32, scan, extended)];
+    unsafe {
+        SendInput(&inputs, size_of::<INPUT>() as i32);
     }
 }
 
@@ -153,15 +181,11 @@ unsafe extern "system" fn key_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
                 return LRESULT(1);
             }
             if !is_alt && down && INTERACT.load(Relaxed) && !PASSED.load(Relaxed) {
-                // Give the app its Alt back, then the key, in order.
                 PASSED.store(true, Relaxed);
                 INTERACT.store(false, Relaxed);
                 post_interact(false);
-                let extended = k.flags.0 & LLKHF_EXTENDED.0 != 0;
-                let inputs = [key_input(VK_MENU.0 as u32, 0, false), key_input(k.vkCode, k.scanCode, extended)];
-                unsafe {
-                    SendInput(&inputs, size_of::<INPUT>() as i32);
-                }
+                let extended = (k.flags.0 & LLKHF_EXTENDED.0 != 0) as isize;
+                post_to_window(WM_REPLAY_KEY, k.vkCode as usize, (k.scanCode as isize & 0xFFFF) | (extended << 16));
                 return LRESULT(1);
             }
         }

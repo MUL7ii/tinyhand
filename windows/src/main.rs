@@ -247,6 +247,8 @@ impl App {
                 self.toolbar.set_wanted(self.near);
             }
             WM_TIMER => self.refresh_taskbar(),
+            hook::WM_REPLAY_CLICK => hook::send_click(lp, wp.0),
+            hook::WM_REPLAY_KEY => hook::send_alt_and_key(wp.0, lp),
             hook::WM_INTERACT => {
                 if self.active && !self.suspended {
                     if wp.0 != 0 {
