@@ -161,6 +161,7 @@ impl App {
     fn toggle_click_through(&mut self) {
         let on = !hook::CLICK_THROUGH.load(Relaxed);
         hook::CLICK_THROUGH.store(on, Relaxed);
+        hook::cancel_pending();
         if hook::HELD.swap(false, Relaxed) {
             hook::UP_SEQ.fetch_add(1, Relaxed);
         }

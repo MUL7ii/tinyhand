@@ -13,7 +13,7 @@ pub const WM_PRESENT: u32 = WM_APP + 3;
 pub static PRESENT_PENDING: AtomicBool = AtomicBool::new(false);
 pub static ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static HELD: AtomicBool = AtomicBool::new(false);
-/// Clicks reach the apps all the time. The hand still taps and drags still draw.
+/// Plain clicks reach the apps. Drags draw and stay out of the apps.
 pub static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
 /// Set by the render thread while it sleeps. The hook wakes it on mouse moves.
 pub static IDLE: AtomicBool = AtomicBool::new(false);
@@ -70,6 +70,35 @@ fn in_passthrough(p: POINT) -> bool {
     PASS.iter().any(|r| p.x >= r[0].load(Relaxed) && p.y >= r[1].load(Relaxed) && p.x < r[2].load(Relaxed) && p.y < r[3].load(Relaxed))
 }
 
+/// Past this distance a press becomes a stroke. Matches the renderer.
+pub const DRAG_PIXELS: f32 = 4.0;
+/// A held press that may still turn out to be a plain click.
+static PENDING: AtomicBool = AtomicBool::new(false);
+static BUTTON: AtomicI32 = AtomicI32::new(0);
+
+pub fn cancel_pending() {
+    PENDING.store(false, Relaxed);
+}
+
+fn mouse_input(flags: MOUSE_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+    }
+}
+
+fn replay_click(x: i32, y: i32, button: i32) {
+    let (down, up) = match button {
+        0 => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        1 => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        _ => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+    };
+    unsafe {
+        let _ = SetCursorPos(x, y);
+        SendInput(&[mouse_input(down), mouse_input(up)], size_of::<INPUT>() as i32);
+    }
+}
+
 /// Alt is held to click for real. The key is hidden from apps while it is.
 pub const WM_INTERACT: u32 = WM_APP + 4;
 pub static INTERACT: AtomicBool = AtomicBool::new(false);
@@ -80,6 +109,7 @@ static TARGET: AtomicIsize = AtomicIsize::new(0);
 pub fn reset_keys() {
     INTERACT.store(false, Relaxed);
     PASSED.store(false, Relaxed);
+    cancel_pending();
 }
 
 fn post_interact(on: bool) {
@@ -144,6 +174,12 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let info = unsafe { &*(lp.0 as *const MSLLHOOKSTRUCT) };
         let msg = wp.0 as u32;
         if msg == WM_MOUSEMOVE {
+            if PENDING.load(Relaxed) {
+                let (dx, dy) = (info.pt.x - DOWN_X.load(Relaxed), info.pt.y - DOWN_Y.load(Relaxed));
+                if ((dx * dx + dy * dy) as f32).sqrt() >= DRAG_PIXELS {
+                    PENDING.store(false, Relaxed);
+                }
+            }
             if IDLE.swap(false, Relaxed) {
                 wake();
             }
@@ -156,21 +192,22 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         DOWN_Y.store(info.pt.y, Relaxed);
                         HELD.store(true, Relaxed);
                         DOWN_SEQ.fetch_add(1, Relaxed);
+                        SWALLOWED.store(true, Relaxed);
+                        // Click-through holds the press until it is clear whether it is a click or a stroke.
+                        PENDING.store(CLICK_THROUGH.load(Relaxed), Relaxed);
+                        BUTTON.store(if msg == WM_LBUTTONDOWN { 0 } else if msg == WM_RBUTTONDOWN { 1 } else { 2 }, Relaxed);
                         wake();
-                        if !CLICK_THROUGH.load(Relaxed) {
-                            SWALLOWED.store(true, Relaxed);
-                            return LRESULT(1);
-                        }
+                        return LRESULT(1);
                     }
                 }
                 WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
-                    let swallowed = SWALLOWED.swap(false, Relaxed);
-                    if swallowed || (CLICK_THROUGH.load(Relaxed) && HELD.load(Relaxed)) {
+                    if SWALLOWED.swap(false, Relaxed) {
                         HELD.store(false, Relaxed);
                         UP_SEQ.fetch_add(1, Relaxed);
+                        if PENDING.swap(false, Relaxed) {
+                            replay_click(DOWN_X.load(Relaxed), DOWN_Y.load(Relaxed), BUTTON.load(Relaxed));
+                        }
                         wake();
-                    }
-                    if swallowed {
                         return LRESULT(1);
                     }
                 }
