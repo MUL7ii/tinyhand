@@ -326,6 +326,11 @@ impl App {
                     }
                 }
             }
+            toolbar::WM_SCREEN_CHANGED => {
+                if self.active && !self.suspended {
+                    self.toolbar.follow_cursor();
+                }
+            }
             toolbar::WM_TB_WANT => {
                 self.near = wp.0 != 0;
                 if self.active && !self.suspended {

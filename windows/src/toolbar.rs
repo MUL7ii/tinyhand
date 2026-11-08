@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use tiny_skia::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -12,6 +13,8 @@ use crate::scene::{draw_laser, px};
 use crate::surface::Surface;
 
 pub const WM_TB_WANT: u32 = WM_APP + 22;
+/// The cursor crossed onto another monitor.
+pub const WM_SCREEN_CHANGED: u32 = WM_APP + 23;
 const TIMER_ANIM: usize = 2;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
@@ -133,10 +136,25 @@ impl Toolbar {
         (self.surface.w, self.surface.h)
     }
 
+    /// Moves to the monitor the cursor is on, without changing whether it is showing.
+    pub fn follow_cursor(&mut self) {
+        self.place();
+        self.present();
+        if self.target > 0.0 {
+            self.set_interactive(true);
+        }
+    }
+
     fn place(&mut self) {
         let mut work = RECT::default();
         unsafe {
-            let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some((&raw mut work).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+            let mut at = POINT::default();
+            let _ = GetCursorPos(&mut at);
+            let monitor = MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                work = info.rcWork;
+            }
         }
         let (w, h) = self.size();
         let left = work.left + (work.right - work.left - w) / 2;

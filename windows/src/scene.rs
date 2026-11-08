@@ -101,6 +101,15 @@ impl Ink {
         }
     }
 
+    /// Starts over at a new screen size. Strokes do not carry between screens.
+    pub fn resize(&mut self, w: i32, h: i32) {
+        self.layer = Pixmap::new(w as u32, h as u32).expect("ink layer");
+        self.strokes.clear();
+        self.drawing = false;
+        self.width = (h as f32 * 0.0055).max(3.0);
+        self.dirty = None;
+    }
+
     pub fn set_color(&mut self, rgb: u32) {
         self.color = px((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255);
     }

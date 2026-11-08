@@ -6,13 +6,14 @@ use std::time::Instant;
 use tiny_skia::PixmapMut;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::DwmFlush;
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW};
 
 use crate::hook;
 use crate::scene::{Ink, Pending, Rc, draw_laser};
 use crate::styles::Style;
-use crate::toolbar::WM_TB_WANT;
+use crate::toolbar::{WM_SCREEN_CHANGED, WM_TB_WANT};
 use crate::surface::Surface;
 
 const DRAG_THRESHOLD: f32 = 4.0;
@@ -36,6 +37,7 @@ pub struct Renderer {
     down_at: (f32, f32),
     press: f32,
     held: bool,
+    stale_press: bool,
     down_seq: u32,
     up_seq: u32,
     last: Instant,
@@ -54,6 +56,16 @@ fn cursor_pos() -> (f32, f32) {
     (p.x as f32, p.y as f32)
 }
 
+/// The monitor under a point, in virtual-desktop pixels.
+fn monitor_rect(at: (f32, f32)) -> RECT {
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x: at.0 as i32, y: at.1 as i32 }, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(monitor, &mut info);
+        info.rcMonitor
+    }
+}
+
 impl Renderer {
     pub fn new(hwnd: HWND, w: i32, h: i32, style: Style, ink_rgb: u32) -> Self {
         let mut ink = Ink::new(w, h);
@@ -69,12 +81,29 @@ impl Renderer {
             down_at: (0.0, 0.0),
             press: 0.0,
             held: false,
+            stale_press: false,
             down_seq: 0,
             up_seq: 0,
             last: Instant::now(),
             drew: false,
             near_toolbar: false,
         }
+    }
+
+    /// Follows the cursor onto another monitor. Returns true when the screen changed.
+    fn sync_screen(&mut self, at: (f32, f32)) -> bool {
+        let r = monitor_rect(at);
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        if w <= 0 || h <= 0 || ((r.left, r.top) == self.surface.origin && (w, h) == (self.surface.w, self.surface.h)) {
+            return false;
+        }
+        self.surface = Surface::new(w, h);
+        self.surface.origin = (r.left, r.top);
+        self.ink.resize(w, h);
+        self.key.clear();
+        self.shape = None;
+        self.drew = true;
+        true
     }
 
     pub fn set_style(&mut self, style: Style, ink_rgb: u32) {
@@ -86,6 +115,8 @@ impl Renderer {
     /// Blank slate and an empty frame. Window thread only.
     pub fn reset(&mut self) {
         self.near_toolbar = false;
+        self.sync_screen(cursor_pos());
+        self.stale_press = false;
         self.surface.clear();
         self.ink.clear();
         self.ink.take_dirty();
@@ -111,9 +142,18 @@ impl Renderer {
     pub fn frame(&mut self) -> Next {
         let dt = self.last.elapsed().as_secs_f32();
         self.last = Instant::now();
-        let at = cursor_pos();
-        let mut busy = at != self.cursor;
-        self.cursor = at;
+        let global = cursor_pos();
+        let mut busy = global != self.cursor;
+        self.cursor = global;
+        if self.sync_screen(global) {
+            // A press that began on the old screen cannot carry a stroke onto this one.
+            self.stale_press = hook::HELD.load(Relaxed);
+            unsafe {
+                let _ = PostMessageW(Some(self.hwnd), WM_SCREEN_CHANGED, WPARAM(0), LPARAM(0));
+            }
+        }
+        let (ox, oy) = (self.surface.origin.0 as f32, self.surface.origin.1 as f32);
+        let at = (global.0 - ox, global.1 - oy);
 
         let down = hook::DOWN_SEQ.load(Relaxed);
         let up = hook::UP_SEQ.load(Relaxed);
@@ -124,13 +164,18 @@ impl Renderer {
         if down != self.down_seq {
             self.down_seq = down;
             self.press = 1.0;
-            self.down_at = (hook::DOWN_X.load(Relaxed) as f32, hook::DOWN_Y.load(Relaxed) as f32);
+            self.stale_press = false;
+            self.down_at = (hook::DOWN_X.load(Relaxed) as f32 - ox, hook::DOWN_Y.load(Relaxed) as f32 - oy);
         }
         self.held = hook::HELD.load(Relaxed);
+        if !self.held {
+            self.stale_press = false;
+        }
 
         if self.held {
             busy = true;
-            if self.ink.is_drawing() {
+            if self.stale_press {
+            } else if self.ink.is_drawing() {
                 self.ink.extend(at);
             } else if (at.0 - self.down_at.0).hypot(at.1 - self.down_at.1) >= DRAG_THRESHOLD {
                 self.ink.begin(self.down_at);
@@ -144,7 +189,7 @@ impl Renderer {
         }
         busy |= self.ink.tick();
 
-        let near = !self.ink.is_drawing() && hook::in_zone(at.0 as i32, at.1 as i32);
+        let near = !self.ink.is_drawing() && hook::in_zone(global.0 as i32, global.1 as i32);
         if near != self.near_toolbar {
             self.near_toolbar = near;
             unsafe {

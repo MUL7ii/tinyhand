@@ -9,8 +9,20 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 pub struct Surface {
     pub w: i32,
     pub h: i32,
+    /// Where the window sits on the virtual desktop.
+    pub origin: (i32, i32),
     dc: HDC,
+    bmp: HBITMAP,
     bits: *mut u8,
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteDC(self.dc);
+            let _ = DeleteObject(self.bmp.into());
+        }
+    }
 }
 
 impl Surface {
@@ -34,7 +46,7 @@ impl Surface {
             let bmp = CreateDIBSection(Some(screen), &bmi, DIB_RGB_COLORS, &mut bits, None, 0).expect("DIB section");
             SelectObject(dc, bmp.into());
             ReleaseDC(None, screen);
-            Self { w, h, dc, bits: bits.cast() }
+            Self { w, h, origin: (0, 0), dc, bmp, bits: bits.cast() }
         }
     }
 
@@ -44,10 +56,6 @@ impl Surface {
 
     pub fn clear(&mut self) {
         self.bytes_mut().fill(0);
-    }
-
-    fn blend() -> BLENDFUNCTION {
-        Self::blend_with(255)
     }
 
     fn blend_with(alpha: u8) -> BLENDFUNCTION {
@@ -66,13 +74,7 @@ impl Surface {
 
     /// Window thread only.
     pub fn present_full(&self, hwnd: HWND) {
-        let origin = POINT::default();
-        let size = SIZE { cx: self.w, cy: self.h };
-        unsafe {
-            if let Err(e) = UpdateLayeredWindow(hwnd, None, Some(&origin), Some(&size), Some(self.dc), Some(&origin), COLORREF(0), Some(&Self::blend()), ULW_ALPHA) {
-                eprintln!("ulw failed: {e}");
-            }
-        }
+        self.present_at(hwnd, self.origin.0, self.origin.1, 255);
     }
 
     pub fn present(&self, hwnd: HWND) {
