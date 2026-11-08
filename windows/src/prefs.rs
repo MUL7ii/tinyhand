@@ -33,10 +33,14 @@ pub fn save_style(id: &str) {
     set("style", id);
 }
 
-pub fn load_click_through() -> bool {
-    get("click_through").is_some_and(|v| v == "1")
+pub fn tap_sound() -> String {
+    get("tap_sound").unwrap_or_else(|| "thock".into())
 }
 
-pub fn save_click_through(on: bool) {
-    set("click_through", if on { "1" } else { "0" });
+pub fn flag(key: &str, default: bool) -> bool {
+    get(key).map_or(default, |v| v == "1")
+}
+
+pub fn set_flag(key: &str, on: bool) {
+    set(key, if on { "1" } else { "0" });
 }

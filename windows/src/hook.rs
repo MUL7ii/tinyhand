@@ -193,6 +193,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         HELD.store(true, Relaxed);
                         DOWN_SEQ.fetch_add(1, Relaxed);
                         SWALLOWED.store(true, Relaxed);
+                        crate::sound::play();
                         // Click-through holds the press until it is clear whether it is a click or a stroke.
                         PENDING.store(CLICK_THROUGH.load(Relaxed), Relaxed);
                         BUTTON.store(if msg == WM_LBUTTONDOWN { 0 } else if msg == WM_RBUTTONDOWN { 1 } else { 2 }, Relaxed);

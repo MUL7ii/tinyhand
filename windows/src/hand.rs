@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use tiny_skia::*;
 
-/// Where the pointer art lives. TH_ASSETS wins, then next to the exe, then the repo.
-fn find(name: &str) -> Option<PathBuf> {
+/// Where the art and sounds live. TH_ASSETS wins, then next to the exe, then the repo.
+pub fn find_asset(rel: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let mut roots = vec![];
@@ -12,7 +12,11 @@ fn find(name: &str) -> Option<PathBuf> {
     }
     roots.push(dir.join("assets"));
     roots.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets")));
-    roots.into_iter().map(|r| r.join(format!("{name}.png"))).find(|p| p.exists())
+    roots.into_iter().map(|r| r.join(rel)).find(|p| p.exists())
+}
+
+fn find(name: &str) -> Option<PathBuf> {
+    find_asset(&format!("{name}.png"))
 }
 
 /// Buffers are BGRA, so swap red and blue once at load.

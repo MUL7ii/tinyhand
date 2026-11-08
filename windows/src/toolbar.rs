@@ -27,12 +27,14 @@ const MARGIN_BOTTOM: f32 = 14.0;
 pub enum Action {
     Pick(String),
     ToggleClickThrough,
+    ToggleSound,
     Exit,
 }
 
 enum Kind {
     Style(String),
     ClickThrough,
+    Sound,
     Exit,
 }
 
@@ -50,6 +52,7 @@ pub struct Toolbar {
     scale: f32,
     selected: String,
     through: bool,
+    sound: bool,
     hover: Option<usize>,
     alpha: f32,
     target: f32,
@@ -102,6 +105,8 @@ impl Toolbar {
         x += (1.0 + GAP) * scale;
         items.push(Item { kind: Kind::ClickThrough, icon: None, x });
         x += (BUTTON + GAP) * scale;
+        items.push(Item { kind: Kind::Sound, icon: None, x });
+        x += (BUTTON + GAP) * scale;
         items.push(Item { kind: Kind::Exit, icon: None, x });
         x += (BUTTON + PAD_X) * scale;
 
@@ -114,6 +119,7 @@ impl Toolbar {
             scale,
             selected: selected.to_string(),
             through: false,
+            sound: true,
             hover: None,
             alpha: 0.0,
             target: 0.0,
@@ -170,6 +176,11 @@ impl Toolbar {
 
     pub fn set_click_through(&mut self, on: bool) {
         self.through = on;
+        self.paint();
+    }
+
+    pub fn set_sound(&mut self, on: bool) {
+        self.sound = on;
         self.paint();
     }
 
@@ -239,7 +250,7 @@ impl Toolbar {
             let chosen = match &item.kind {
                 Kind::Style(id) => *id == self.selected,
                 Kind::ClickThrough => self.through,
-                Kind::Exit => false,
+                Kind::Sound | Kind::Exit => false,
             };
             let tint = if chosen { 46 } else if self.hover == Some(i) { 24 } else { 0 };
             if tint > 0 {
@@ -254,6 +265,44 @@ impl Toolbar {
                     pix.draw_pixmap(ix.round() as i32, iy.round() as i32, icon.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 }
                 (Kind::Style(_), None) => draw_laser(&mut pix, (cx, cy), 5.0 * s),
+                (Kind::Sound, None) => {
+                    let alpha = if self.sound { 217 } else { 115 };
+                    let at = |x: f32, y: f32| (cx + (x - 9.0) * s, cy + (y - 8.0) * s);
+                    let mut pb = PathBuilder::new();
+                    for (i, (x, y)) in [(0.0, 5.0), (4.0, 5.0), (9.0, 1.0), (9.0, 15.0), (4.0, 11.0), (0.0, 11.0)].iter().enumerate() {
+                        let (px_, py_) = at(*x, *y);
+                        if i == 0 {
+                            pb.move_to(px_, py_);
+                        } else {
+                            pb.line_to(px_, py_);
+                        }
+                    }
+                    pb.close();
+                    if let Some(path) = pb.finish() {
+                        fill(&mut pix, &path, px(255, 255, 255, alpha));
+                    }
+                    let mut paint = Paint::default();
+                    paint.set_color(px(255, 255, 255, alpha));
+                    paint.anti_alias = true;
+                    let stroke = Stroke { width: 1.5 * s, line_cap: LineCap::Round, ..Default::default() };
+                    let mut pb = PathBuilder::new();
+                    if self.sound {
+                        for (x0, y0, cx_, cy_, x1, y1) in [(11.5, 5.5, 14.0, 8.0, 11.5, 10.5), (13.5, 3.5, 18.0, 8.0, 13.5, 12.5)] {
+                            let (a, b, c) = (at(x0, y0), at(cx_, cy_), at(x1, y1));
+                            pb.move_to(a.0, a.1);
+                            pb.quad_to(b.0, b.1, c.0, c.1);
+                        }
+                    } else {
+                        for (x0, y0, x1, y1) in [(12.0, 5.0, 17.0, 11.0), (17.0, 5.0, 12.0, 11.0)] {
+                            let (a, b) = (at(x0, y0), at(x1, y1));
+                            pb.move_to(a.0, a.1);
+                            pb.line_to(b.0, b.1);
+                        }
+                    }
+                    if let Some(path) = pb.finish() {
+                        pix.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                    }
+                }
                 (Kind::ClickThrough, None) => {
                     let arrow = [(0.0, 0.0), (0.0, 16.0), (4.2, 12.2), (7.0, 18.5), (9.6, 17.4), (6.9, 11.3), (12.4, 11.0)];
                     let mut pb = PathBuilder::new();
@@ -339,6 +388,7 @@ impl Toolbar {
                 let action = self.hit(x, y).map(|i| match &self.items[i].kind {
                     Kind::Style(id) => Action::Pick(id.clone()),
                     Kind::ClickThrough => Action::ToggleClickThrough,
+                    Kind::Sound => Action::ToggleSound,
                     Kind::Exit => Action::Exit,
                 });
                 Some((LRESULT(0), action))

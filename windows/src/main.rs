@@ -7,6 +7,7 @@ mod hook;
 mod prefs;
 mod renderer;
 mod scene;
+mod sound;
 mod styles;
 mod surface;
 mod toolbar;
@@ -58,6 +59,7 @@ struct App {
     near: bool,
     /// The toolbar shows for a few seconds after turning on.
     initial: bool,
+    style_id: String,
 }
 
 const YIELD_TO: [&str; 3] = ["screenclippinghost.exe", "snippingtool.exe", "screensketch.exe"];
@@ -151,11 +153,29 @@ impl App {
             SetTimer(Some(self.hwnd), TIMER_INITIAL, 3000, None);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
+        sound::open();
         self.near = false;
         self.initial = true;
         self.toolbar.show();
         self.toolbar.set_wanted(true);
         hook::wake();
+    }
+
+    fn sound_key(&self) -> &'static str {
+        if self.style_id == "laser" { "sound_laser" } else { "sound_hands" }
+    }
+
+    /// Hands tap by default and the laser stays quiet, each with its own switch.
+    fn refresh_sound(&mut self) {
+        let on = prefs::flag(self.sound_key(), self.style_id != "laser");
+        sound::set_enabled(on);
+        self.toolbar.set_sound(on);
+    }
+
+    fn toggle_sound(&mut self) {
+        let key = self.sound_key();
+        prefs::set_flag(key, !prefs::flag(key, self.style_id != "laser"));
+        self.refresh_sound();
     }
 
     fn toggle_click_through(&mut self) {
@@ -166,7 +186,7 @@ impl App {
             hook::UP_SEQ.fetch_add(1, Relaxed);
         }
         self.toolbar.set_click_through(on);
-        prefs::save_click_through(on);
+        prefs::set_flag("click_through", on);
         hook::wake();
     }
 
@@ -175,6 +195,8 @@ impl App {
         lock(&self.renderer).set_style(style, ink);
         self.toolbar.select(id);
         prefs::save_style(id);
+        self.style_id = id.to_string();
+        self.refresh_sound();
         hook::wake();
     }
 
@@ -184,6 +206,7 @@ impl App {
         hook::reset_keys();
         cursor::restore();
         lock(&self.renderer).reset();
+        sound::close();
         self.toolbar.hide();
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_TASKBAR);
@@ -209,6 +232,7 @@ impl App {
             match action {
                 Some(Action::Pick(id)) => self.pick(&id),
                 Some(Action::ToggleClickThrough) => self.toggle_click_through(),
+                Some(Action::ToggleSound) => self.toggle_sound(),
                 Some(Action::Exit) => self.deactivate(),
                 None => {}
             }
@@ -402,11 +426,14 @@ fn main() {
             pinned.insert(pinned.len() - 1, &id);
         }
         let mut toolbar = Toolbar::new(bar, &pinned, &id);
-        let through = prefs::load_click_through();
+        let through = prefs::flag("click_through", false);
         hook::CLICK_THROUGH.store(through, Relaxed);
         toolbar.set_click_through(through);
+        sound::load();
+        sound::set_choice(&prefs::tap_sound());
         let renderer = Arc::new(Mutex::new(Renderer::new(hwnd, w, h, style, ink)));
-        let app = App { hwnd, renderer: renderer.clone(), toolbar, active: false, suspended: false, near: false, initial: false };
+        let mut app = App { hwnd, renderer: renderer.clone(), toolbar, active: false, suspended: false, near: false, initial: false, style_id: id.clone() };
+        app.refresh_sound();
         APP.with(|a| *a.borrow_mut() = Some(app));
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT);
         hook::init();
