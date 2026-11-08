@@ -80,10 +80,19 @@ pub fn cancel_pending() {
     PENDING.store(false, Relaxed);
 }
 
+/// Marks input TinyHand injects itself, so it is never mistaken for the user's.
+const MAGIC: usize = 0x5448_414E;
+static TEST_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// Real input is anything not injected. The test switch also counts others' injected input.
+fn is_real(flags: u32, extra: usize) -> bool {
+    flags & 1 == 0 || (TEST_INPUT.load(Relaxed) && extra != MAGIC)
+}
+
 fn mouse_input(flags: MOUSE_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: MAGIC } },
     }
 }
 
@@ -157,7 +166,7 @@ fn key_input(vk: u32, scan: u32, extended: bool) -> INPUT {
                 wScan: scan as u16,
                 dwFlags: if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) },
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: MAGIC,
             },
         },
     }
@@ -207,7 +216,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             if IDLE.swap(false, Relaxed) {
                 wake();
             }
-        } else if info.flags & LLMHF_INJECTED == 0 {
+        } else if is_real(info.flags, info.dwExtraInfo) {
             match msg {
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
                     SWALLOWED.store(false, Relaxed);
@@ -246,6 +255,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 /// Own thread, so the callback never waits on rendering.
 pub fn start(target: HWND) {
     TARGET.store(target.0 as isize, Relaxed);
+    TEST_INPUT.store(std::env::var_os("TH_TEST_INPUT").is_some(), Relaxed);
     std::thread::spawn(|| unsafe {
         let hinst = GetModuleHandleW(None).map(|m| HINSTANCE(m.0)).ok();
         if SetWindowsHookExW(WH_MOUSE_LL, Some(proc), hinst, 0).is_err() {

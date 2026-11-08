@@ -246,10 +246,16 @@ pub fn run(shared: Arc<Mutex<Renderer>>) {
             hook::wait(INFINITE);
             continue;
         }
-        let (next, drew, hwnd) = {
+        let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut r = lock(&shared);
             let next = r.frame();
             (next, std::mem::take(&mut r.drew), r.hwnd_raw())
+        }));
+        // A panic here would freeze the overlay while the hook keeps swallowing clicks. Log it and carry on.
+        let Ok((next, drew, hwnd)) = frame else {
+            crate::log::write("render frame panicked, retrying");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
         };
         if drew && !hook::PRESENT_PENDING.swap(true, Relaxed) {
             unsafe {

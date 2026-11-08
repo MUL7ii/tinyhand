@@ -8,6 +8,8 @@ const GRIP_LEAN: f32 = 0.30;
 const GRIP_DEPTH: f32 = 0.12;
 const GRIP_FOLLOW: f32 = 0.08;
 const LIFT: f32 = 0.06;
+/// The shadow is a soft blur, so it is drawn and blurred at a quarter of the size.
+const SHADOW_SCALE: f32 = 0.25;
 /// The follow and press rates were tuned at 120 ticks per second.
 const TICK_HZ: f32 = 120.0;
 
@@ -148,21 +150,22 @@ impl Arm {
     fn draw_shadow(&self, pix: &mut PixmapMut, p: &Pose, base: Transform) {
         let pad = (p.blur * 2.0).ceil() as i32 + 2;
         let top = p.rod_len + p.hand_pts;
-        let w = (p.width.ceil() as i32 + 2 * pad) as u32;
-        let h = (top.ceil() as i32 + 2 * pad) as u32;
+        let k = SHADOW_SCALE;
+        let w = (((p.width.ceil() as i32 + 2 * pad) as f32 * k).ceil() as u32).max(1);
+        let h = (((top.ceil() as i32 + 2 * pad) as f32 * k).ceil() as u32).max(1);
         let Some(mut sil) = Pixmap::new(w, h) else { return };
-        let to_buf = Transform::from_row(1.0, 0.0, 0.0, -1.0, pad as f32, top + pad as f32);
+        let to_buf = Transform::from_scale(k, k).pre_concat(Transform::from_row(1.0, 0.0, 0.0, -1.0, pad as f32, top + pad as f32));
         self.parts(&mut sil.as_mut(), to_buf, p);
 
         let mut alpha: Vec<u8> = sil.data().chunks_exact(4).map(|px| px[3]).collect();
-        let radius = (p.blur / 2.0).round().max(1.0) as usize;
+        let radius = (p.blur / 2.0 * k).round().max(1.0) as usize;
         box_blur(&mut alpha, w as usize, h as usize, radius);
         for (px, a) in sil.data_mut().chunks_exact_mut(4).zip(&alpha) {
             px.copy_from_slice(&[0, 0, 0, (*a as f32 * p.opacity) as u8]);
         }
 
         let offset = Transform::from_translate(p.lift * 0.6, p.lift);
-        let from_buf = Transform::from_row(1.0, 0.0, 0.0, -1.0, -pad as f32, top + pad as f32);
+        let from_buf = Transform::from_row(1.0 / k, 0.0, 0.0, -1.0 / k, -pad as f32, top + pad as f32);
         let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
         pix.draw_pixmap(0, 0, sil.as_ref(), &paint, offset.pre_concat(base).pre_concat(from_buf), None);
     }

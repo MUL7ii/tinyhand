@@ -4,6 +4,7 @@ mod arm;
 mod cursor;
 mod hand;
 mod hook;
+mod log;
 mod prefs;
 mod renderer;
 mod scene;
@@ -357,6 +358,8 @@ fn main() {
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         cursor::restore();
+        let thread = std::thread::current();
+        log::write(&format!("panic on '{}': {info}\n{}", thread.name().unwrap_or("?"), std::backtrace::Backtrace::force_capture()));
         default_panic(info);
     }));
 
@@ -440,7 +443,7 @@ fn main() {
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT);
         hook::init();
         hook::start(hwnd);
-        std::thread::spawn(move || renderer::run(renderer));
+        let _ = std::thread::Builder::new().name("render".into()).spawn(move || renderer::run(renderer));
         add_tray(hwnd);
         // Release builds have no console of their own. Borrow the terminal's so Ctrl+C reaches us.
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
