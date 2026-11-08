@@ -48,6 +48,7 @@ static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 
 const TIMER_INITIAL: usize = 3;
 const TIMER_RAISE: usize = 4;
+const TIMER_POPUPS: usize = 5;
 const PINNED: [&str; 6] = ["lavender", "glove", "coral", "plush", "robot", "laser"];
 
 struct App {
@@ -66,24 +67,61 @@ struct App {
 
 const YIELD_TO: [&str; 3] = ["screenclippinghost.exe", "snippingtool.exe", "screensketch.exe"];
 
-fn should_yield(hwnd: HWND) -> bool {
+/// Lower-cased exe name of the process that owns a window.
+fn process_name(hwnd: HWND) -> Option<String> {
     if hwnd.0.is_null() {
-        return false;
+        return None;
     }
     let mut pid = 0u32;
     unsafe {
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 512];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
         let _ = CloseHandle(process);
-        if !ok {
-            return false;
-        }
         let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
-        let name = path.rsplit('\\').next().unwrap_or("");
-        YIELD_TO.contains(&name)
+        ok.then(|| path.rsplit('\\').next().unwrap_or("").to_string())
+    }
+}
+
+fn should_yield(hwnd: HWND) -> bool {
+    process_name(hwnd).is_some_and(|n| YIELD_TO.contains(&n.as_str()))
+}
+
+const SHELL_HOSTS: [&str; 3] = ["startmenuexperiencehost.exe", "searchhost.exe", "shellexperiencehost.exe"];
+
+/// Windows' own popups. Clicks on them must reach Windows, or menus and flyouts cannot be used.
+fn is_system_popup(hwnd: HWND) -> bool {
+    let mut class = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+    match String::from_utf16_lossy(&class[..n]).as_str() {
+        "#32768" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "TopLevelWindowForOverflowXamlIsland" | "NotifyIconOverflowWindow" | "XamlExplorerHostIslandWindow" => true,
+        // Apps host their UI in these too, so only the shell's own count.
+        "Windows.UI.Core.CoreWindow" => process_name(hwnd).is_some_and(|n| SHELL_HOSTS.contains(&n.as_str())),
+        _ => false,
+    }
+}
+
+unsafe extern "system" fn collect_popup(hwnd: HWND, lp: LPARAM) -> BOOL {
+    let found = unsafe { &mut *(lp.0 as *mut Vec<RECT>) };
+    if found.len() < hook::PASS_SLOTS - 2 && unsafe { IsWindowVisible(hwnd) }.as_bool() && is_system_popup(hwnd) {
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut r) }.is_ok() && r.right > r.left && r.bottom > r.top {
+            found.push(r);
+        }
+    }
+    BOOL(1)
+}
+
+/// Keeps the hook's pass-through list up to date with whatever system popups are open.
+fn scan_popups() {
+    let mut found: Vec<RECT> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(collect_popup), LPARAM((&raw mut found) as isize));
+    }
+    for slot in 0..hook::PASS_SLOTS - 2 {
+        hook::set_passthrough(2 + slot, found.get(slot).copied().unwrap_or_default());
     }
 }
 
@@ -146,6 +184,7 @@ impl App {
     fn start(&mut self) {
         lock(&self.renderer).reset();
         self.refresh_taskbar();
+        scan_popups();
         hook::reset_keys();
         hook::HELD.store(false, Relaxed);
         hook::ACTIVE.store(true, Relaxed);
@@ -155,6 +194,7 @@ impl App {
             SetTimer(Some(self.hwnd), TIMER_TASKBAR, 500, None);
             SetTimer(Some(self.hwnd), TIMER_INITIAL, 3000, None);
             SetTimer(Some(self.hwnd), TIMER_RAISE, 250, None);
+            SetTimer(Some(self.hwnd), TIMER_POPUPS, 100, None);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
         sound::open();
@@ -211,11 +251,15 @@ impl App {
         cursor::restore();
         lock(&self.renderer).reset();
         sound::close();
+        for slot in 2..hook::PASS_SLOTS {
+            hook::set_passthrough(slot, RECT::default());
+        }
         self.toolbar.hide();
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_TASKBAR);
             let _ = KillTimer(Some(self.hwnd), TIMER_INITIAL);
             let _ = KillTimer(Some(self.hwnd), TIMER_RAISE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_POPUPS);
             let _ = UnregisterHotKey(Some(self.hwnd), HK_ESC);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -245,6 +289,10 @@ impl App {
     }
 
     fn on_message(&mut self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        if msg == WM_ACTIVATE && (hwnd == self.hwnd || hwnd == self.toolbar.hwnd) && wp.0 & 0xFFFF != 0 {
+            self.give_back_focus(HWND(lp.0 as *mut c_void));
+            return Some(LRESULT(0));
+        }
         if hwnd == self.toolbar.hwnd {
             let (result, action) = self.toolbar.handle(msg, wp, lp)?;
             match action {
@@ -265,6 +313,7 @@ impl App {
                 self.toolbar.set_wanted(self.near);
             }
             WM_TIMER if wp.0 == TIMER_RAISE => self.raise(),
+            WM_TIMER if wp.0 == TIMER_POPUPS => scan_popups(),
             WM_TIMER => self.refresh_taskbar(),
             hook::WM_REPLAY_CLICK => hook::send_click(lp, wp.0),
             hook::WM_REPLAY_KEY => hook::send_alt_and_key(wp.0, lp),
@@ -299,40 +348,86 @@ impl App {
                 HK_THROUGH => self.toggle_click_through(),
                 _ => {}
             },
-            WM_TRAY => match (lp.0 as u32) & 0xFFFF {
-                WM_LBUTTONUP => self.toggle(),
-                WM_RBUTTONUP => self.tray_menu(hwnd),
-                _ => {}
-            },
-            WM_COMMAND => match wp.0 & 0xFFFF {
-                CMD_TOGGLE => self.toggle(),
-                CMD_THROUGH => self.toggle_click_through(),
-                CMD_QUIT => unsafe { PostQuitMessage(0) },
-                _ => {}
-            },
+            WM_TRAY => {
+                if (lp.0 as u32) & 0xFFFF == WM_LBUTTONUP {
+                    self.toggle();
+                }
+            }
+            WM_COMMAND => self.command(wp.0 & 0xFFFF),
             _ => return None,
         }
         Some(LRESULT(0))
     }
 
-    fn tray_menu(&self, hwnd: HWND) {
+    fn command(&mut self, cmd: usize) {
+        match cmd {
+            CMD_TOGGLE => self.toggle(),
+            CMD_THROUGH => self.toggle_click_through(),
+            CMD_QUIT => unsafe { PostQuitMessage(0) },
+            _ => {}
+        }
+    }
+
+    /// The full-screen overlay must never hold keyboard focus. When Windows hands it over
+    /// (for example after a flyout closes), pass it back to the window that had it.
+    fn give_back_focus(&self, previous: HWND) {
+        let ours = |h: HWND| h == self.hwnd || h == self.toolbar.hwnd;
         unsafe {
-            let Ok(menu) = CreatePopupMenu() else { return };
-            let label = if self.active { w!("Turn pointer off") } else { w!("Turn pointer on") };
-            let _ = AppendMenuW(menu, MF_STRING, CMD_TOGGLE, label);
-            let checked = if hook::CLICK_THROUGH.load(Relaxed) { MF_CHECKED } else { MF_UNCHECKED };
-            let _ = AppendMenuW(menu, MF_STRING | checked, CMD_THROUGH, w!("Click through\tCtrl+Alt+C"));
-            let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit TinyHand"));
-            let mut p = POINT::default();
-            let _ = GetCursorPos(&mut p);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, p.x, p.y, Some(0), hwnd, None);
-            let _ = DestroyMenu(menu);
+            if !previous.0.is_null() && !ours(previous) && IsWindowVisible(previous).as_bool() {
+                let _ = SetForegroundWindow(previous);
+                return;
+            }
+            let mut next = GetWindow(self.hwnd, GW_HWNDNEXT).ok();
+            while let Some(w) = next {
+                let tool = GetWindowLongPtrW(w, GWL_EXSTYLE) & WS_EX_TOOLWINDOW.0 as isize != 0;
+                if !ours(w) && IsWindowVisible(w).as_bool() && !tool && GetWindowTextLengthW(w) > 0 {
+                    let _ = SetForegroundWindow(w);
+                    return;
+                }
+                next = GetWindow(w, GW_HWNDNEXT).ok();
+            }
         }
     }
 }
 
+/// Runs outside the app borrow and its own tiny window. While it is open the overlay keeps
+/// redrawing and every click goes through, so the menu can actually be used.
+fn show_tray_menu(tray: HWND) {
+    let active = APP.with(|c| c.try_borrow().ok().and_then(|s| s.as_ref().map(|a| a.active))).unwrap_or(false);
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let label = if active { w!("Turn pointer off") } else { w!("Turn pointer on") };
+        let _ = AppendMenuW(menu, MF_STRING, CMD_TOGGLE, label);
+        let checked = if hook::CLICK_THROUGH.load(Relaxed) { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, MF_STRING | checked, CMD_THROUGH, w!("Click through\tCtrl+Alt+C"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit TinyHand"));
+        let mut p = POINT::default();
+        let _ = GetCursorPos(&mut p);
+        hook::PAUSE.store(true, Relaxed);
+        if active {
+            cursor::restore();
+        }
+        let _ = SetForegroundWindow(tray);
+        let cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, Some(0), tray, None);
+        let _ = PostMessageW(Some(tray), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        hook::PAUSE.store(false, Relaxed);
+        APP.with(|c| {
+            if let Some(app) = c.try_borrow_mut().ok().as_mut().and_then(|s| s.as_mut()) {
+                if app.active && !app.suspended {
+                    cursor::hide();
+                }
+                app.command(cmd.0 as usize);
+            }
+        });
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_TRAY && (lp.0 as u32) & 0xFFFF == WM_RBUTTONUP {
+        show_tray_menu(hwnd);
+        return LRESULT(0);
+    }
     // try_borrow_mut: ShowWindow and friends re-enter this proc.
     let handled = APP.with(|cell| {
         let mut slot = cell.try_borrow_mut().ok()?;
@@ -442,6 +537,18 @@ fn main() {
         .expect("toolbar window");
         let _ = DwmSetWindowAttribute(bar, DWMWA_TRANSITIONS_FORCEDISABLED, (&raw const off).cast(), size_of::<BOOL>() as u32);
 
+        // The tray icon and its menu get their own tiny window, so the overlay never takes focus.
+        let tray_class = w!("TinyHandTray");
+        RegisterClassExW(&WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinst,
+            lpszClassName: tray_class,
+            ..Default::default()
+        });
+        let tray = CreateWindowExW(WS_EX_TOOLWINDOW, tray_class, w!("TinyHand tray"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None).expect("tray window");
+        HWND_RAW.store(tray.0 as isize, Relaxed);
+
         let id = std::env::args().nth(1).or_else(prefs::load_style).unwrap_or_else(|| "lavender".into());
         let (style, ink) = styles::load(&id);
         let mut pinned = PINNED.to_vec();
@@ -462,7 +569,7 @@ fn main() {
         hook::init();
         hook::start(hwnd);
         let _ = std::thread::Builder::new().name("render".into()).spawn(move || renderer::run(renderer));
-        add_tray(hwnd);
+        add_tray(tray);
         // Release builds have no console of their own. Borrow the terminal's so Ctrl+C reaches us.
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
         let _ = SetConsoleCtrlHandler(Some(on_ctrl), true);
@@ -480,6 +587,6 @@ fn main() {
 
         hook::ACTIVE.store(false, Relaxed);
         cursor::restore();
-        remove_tray(hwnd);
+        remove_tray(tray);
     }
 }

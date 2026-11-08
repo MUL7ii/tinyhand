@@ -24,8 +24,12 @@ pub static DOWN_Y: AtomicI32 = AtomicI32::new(0);
 
 static WAKE: AtomicIsize = AtomicIsize::new(0);
 static SWALLOWED: AtomicBool = AtomicBool::new(false);
-/// Clicks inside these rects reach the windows under the overlay: taskbar, toolbar.
-static PASS: [[AtomicI32; 4]; 2] = [const { [const { AtomicI32::new(0) }; 4] }; 2];
+/// Clicks inside these rects reach the windows under the overlay. Slot 0 is the taskbar,
+/// 1 the toolbar, the rest open menus, flyouts and Start.
+pub const PASS_SLOTS: usize = 8;
+static PASS: [[AtomicI32; 4]; PASS_SLOTS] = [const { [const { AtomicI32::new(0) }; 4] }; PASS_SLOTS];
+/// Every click goes through while TinyHand's own menu is open.
+pub static PAUSE: AtomicBool = AtomicBool::new(false);
 /// Cursor zone that reveals the toolbar.
 pub static ZONE: [AtomicI32; 4] = [const { AtomicI32::new(0) }; 4];
 
@@ -220,7 +224,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             match msg {
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
                     SWALLOWED.store(false, Relaxed);
-                    if !INTERACT.load(Relaxed) && !in_passthrough(info.pt) {
+                    if !INTERACT.load(Relaxed) && !PAUSE.load(Relaxed) && !in_passthrough(info.pt) {
                         DOWN_X.store(info.pt.x, Relaxed);
                         DOWN_Y.store(info.pt.y, Relaxed);
                         HELD.store(true, Relaxed);
