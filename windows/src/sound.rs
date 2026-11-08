@@ -1,14 +1,20 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Media::Audio::*;
-use windows::Win32::Media::MMSYSERR_NOERROR;
-use windows::core::PSTR;
+use windows::Win32::System::Com::*;
 
 use crate::hand::find_asset;
 
 pub const CHOICES: [&str; 6] = ["thock", "click", "pop", "wood", "boop", "squeak"];
+
+const RATE: u32 = 44100;
+/// Audio queued ahead of the speakers. Small, so a tap is heard within a few milliseconds.
+const QUEUE_FRAMES: u32 = 280;
+const TICK: Duration = Duration::from_millis(3);
+const STOP_AFTER_IDLE: Duration = Duration::from_secs(30);
 
 enum Cmd {
     Open,
@@ -20,8 +26,8 @@ static TX: OnceLock<Sender<Cmd>> = OnceLock::new();
 static CHOICE: AtomicUsize = AtomicUsize::new(0);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
-/// 44.1 kHz, 16-bit, mono. Returns the raw samples or None for anything else.
-fn pcm(bytes: &[u8]) -> Option<Vec<u8>> {
+/// 44.1 kHz, 16-bit, mono. Returns the samples or None for anything else.
+fn pcm(bytes: &[u8]) -> Option<Vec<i16>> {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
@@ -35,9 +41,9 @@ fn pcm(bytes: &[u8]) -> Option<Vec<u8>> {
                 let channels = u16::from_le_bytes([body[2], body[3]]);
                 let rate = u32::from_le_bytes(body[4..8].try_into().ok()?);
                 let bits = u16::from_le_bytes([body[14], body[15]]);
-                ok = tag == 1 && channels == 1 && rate == 44100 && bits == 16;
+                ok = tag == 1 && channels == 1 && rate == RATE && bits == 16;
             }
-            b"data" => return ok.then(|| body.to_vec()),
+            b"data" => return ok.then(|| body.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()),
             _ => {}
         }
         at += 8 + size + (size & 1);
@@ -45,89 +51,147 @@ fn pcm(bytes: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Everything that touches the audio device lives on this one thread. The mouse hook
-/// only sends a message, because a slow or blocked hook stalls the whole system.
-struct Player {
-    clips: Vec<Vec<u8>>,
-    headers: Vec<Box<WAVEHDR>>,
-    device: Option<HWAVEOUT>,
+/// An open shared-mode stream. WASAPI converts our 44.1 kHz mono to the device format.
+struct Stream {
+    client: IAudioClient,
+    render: IAudioRenderClient,
+    frames: u32,
+    running: bool,
 }
 
-impl Player {
-    fn open(&mut self) {
-        if self.device.is_some() {
+impl Stream {
+    fn open() -> windows::core::Result<Self> {
+        unsafe {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            let format = WAVEFORMATEX { wFormatTag: WAVE_FORMAT_PCM as u16, nChannels: 1, nSamplesPerSec: RATE, nAvgBytesPerSec: RATE * 2, nBlockAlign: 2, wBitsPerSample: 16, cbSize: 0 };
+            let flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+            client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 200_000, 0, &format, None)?;
+            let frames = client.GetBufferSize()?;
+            let render: IAudioRenderClient = client.GetService()?;
+            Ok(Self { client, render, frames, running: false })
+        }
+    }
+
+    fn start(&mut self) {
+        if !self.running && unsafe { self.client.Start() }.is_ok() {
+            self.running = true;
+        }
+    }
+
+    fn stop(&mut self) {
+        if self.running {
+            unsafe {
+                let _ = self.client.Stop();
+                let _ = self.client.Reset();
+            }
+            self.running = false;
+        }
+    }
+
+    /// Tops the queue up to a few milliseconds, with the current tap or silence.
+    fn pump(&mut self, voice: &mut Option<(usize, usize)>, clips: &[Vec<i16>]) {
+        let Ok(padding) = (unsafe { self.client.GetCurrentPadding() }) else { return };
+        let room = self.frames.saturating_sub(padding);
+        let n = QUEUE_FRAMES.saturating_sub(padding).min(room);
+        if n == 0 {
             return;
         }
-        let format = WAVEFORMATEX { wFormatTag: WAVE_FORMAT_PCM as u16, nChannels: 1, nSamplesPerSec: 44100, nAvgBytesPerSec: 88200, nBlockAlign: 2, wBitsPerSample: 16, cbSize: 0 };
-        let mut device = HWAVEOUT::default();
-        unsafe {
-            if waveOutOpen(Some(&mut device), WAVE_MAPPER, &format, None, None, CALLBACK_NULL) != MMSYSERR_NOERROR {
-                return;
-            }
-            for (clip, hdr) in self.clips.iter().zip(&mut self.headers) {
-                **hdr = WAVEHDR { lpData: PSTR(clip.as_ptr() as *mut u8), dwBufferLength: clip.len() as u32, ..Default::default() };
-                waveOutPrepareHeader(device, &mut **hdr, size_of::<WAVEHDR>() as u32);
+        let Ok(buffer) = (unsafe { self.render.GetBuffer(n) }) else { return };
+        let out = unsafe { std::slice::from_raw_parts_mut(buffer.cast::<i16>(), n as usize) };
+        out.fill(0);
+        if let Some((clip, pos)) = voice {
+            let data = &clips[*clip];
+            let take = (data.len() - *pos).min(out.len());
+            out[..take].copy_from_slice(&data[*pos..*pos + take]);
+            *pos += take;
+            if *pos >= data.len() {
+                *voice = None;
             }
         }
-        self.device = Some(device);
-    }
-
-    fn close(&mut self) {
-        let Some(device) = self.device.take() else { return };
         unsafe {
-            waveOutReset(device);
-            for hdr in &mut self.headers {
-                waveOutUnprepareHeader(device, &mut **hdr, size_of::<WAVEHDR>() as u32);
-            }
-            waveOutClose(device);
-        }
-    }
-
-    /// Cuts off the previous tap, like Mac's .interrupts.
-    fn play(&mut self) {
-        let Some(device) = self.device else { return };
-        let i = CHOICE.load(Relaxed);
-        let Some(hdr) = self.headers.get_mut(i).filter(|_| self.clips.get(i).is_some_and(|c| !c.is_empty())) else { return };
-        unsafe {
-            waveOutReset(device);
-            waveOutWrite(device, &mut **hdr, size_of::<WAVEHDR>() as u32);
+            let _ = self.render.ReleaseBuffer(n, 0);
         }
     }
 }
 
+/// Everything that touches the audio device lives on this one thread. The mouse hook
+/// only sends a message, because a slow or blocked hook stalls the whole system.
 fn run(rx: Receiver<Cmd>) {
-    let clips: Vec<Vec<u8>> = CHOICES
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    let clips: Vec<Vec<i16>> = CHOICES
         .iter()
         .map(|name| find_asset(&format!("sounds/tap_{name}.wav")).and_then(|p| std::fs::read(p).ok()).and_then(|b| pcm(&b)).unwrap_or_default())
         .collect();
-    let headers = clips.iter().map(|_| Box::new(WAVEHDR::default())).collect();
-    let mut player = Player { clips, headers, device: None };
-    while let Ok(first) = rx.recv() {
-        let mut batch = vec![first];
-        batch.extend(rx.try_iter());
-        // Taps that piled up while the device was busy collapse into one.
-        let last = batch.len() - 1;
-        for (i, cmd) in batch.iter().enumerate() {
-            match cmd {
-                Cmd::Open => player.open(),
-                Cmd::Close => player.close(),
-                Cmd::Play if matches!(batch.get(i + 1), Some(Cmd::Play)) && i != last => {}
-                Cmd::Play => player.play(),
+
+    let mut stream: Option<Stream> = None;
+    let mut voice: Option<(usize, usize)> = None;
+    let mut wanted = false;
+    let mut last_tap = Instant::now();
+
+    loop {
+        let cmd = match stream.as_ref().is_some_and(|s| s.running) {
+            true => match rx.recv_timeout(TICK) {
+                Ok(cmd) => Some(cmd),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            false => match rx.recv() {
+                Ok(cmd) => Some(cmd),
+                Err(_) => break,
+            },
+        };
+        match cmd {
+            Some(Cmd::Open) => {
+                wanted = true;
+                if stream.is_none() {
+                    match Stream::open() {
+                        Ok(s) => stream = Some(s),
+                        Err(e) => crate::log::write(&format!("audio open failed: {e}")),
+                    }
+                }
+                last_tap = Instant::now();
+                if let Some(s) = &mut stream {
+                    s.start();
+                }
+            }
+            Some(Cmd::Close) => {
+                wanted = false;
+                voice = None;
+                if let Some(mut s) = stream.take() {
+                    s.stop();
+                }
+            }
+            Some(Cmd::Play) if wanted => {
+                let i = CHOICE.load(Relaxed);
+                if clips.get(i).is_some_and(|c| !c.is_empty()) {
+                    voice = Some((i, 0));
+                }
+                last_tap = Instant::now();
+                if let Some(s) = &mut stream {
+                    s.start();
+                }
+            }
+            _ => {}
+        }
+        if let Some(s) = &mut stream {
+            if s.running {
+                s.pump(&mut voice, &clips);
+                if voice.is_none() && last_tap.elapsed() > STOP_AFTER_IDLE {
+                    s.stop();
+                }
             }
         }
     }
 }
 
-/// Off until the waveOut backend is replaced: processes with it open got stuck exiting.
-const AUDIO_ENABLED: bool = false;
-
 pub fn load() {
-    if !AUDIO_ENABLED {
-        return;
-    }
     TX.get_or_init(|| {
         let (tx, rx) = channel();
-        std::thread::spawn(move || run(rx));
+        let _ = std::thread::Builder::new().name("audio".into()).spawn(move || run(rx));
         tx
     });
 }
