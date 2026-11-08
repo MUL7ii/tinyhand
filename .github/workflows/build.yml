@@ -13,3 +13,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build (universal)
         run: swift build -c release --arch arm64 --arch x86_64
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        working-directory: windows
+        run: cargo build --release
+      - name: Stage the app with its images and sounds
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/TinyHand/assets/sounds | Out-Null
+          Copy-Item windows/target/release/tinyhand.exe dist/TinyHand/TinyHand.exe
+          Copy-Item assets/hand_*.png dist/TinyHand/assets/
+          Copy-Item assets/sounds/tap_*.wav dist/TinyHand/assets/sounds/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TinyHand-windows
+          path: dist/TinyHand
