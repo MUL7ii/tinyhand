@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Media::timeBeginPeriod;
-use windows::Win32::System::Console::SetConsoleCtrlHandler;
+use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, SetConsoleCtrlHandler};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
@@ -301,6 +301,8 @@ fn main() {
         hook::start();
         std::thread::spawn(move || renderer::run(renderer));
         add_tray(hwnd);
+        // Release builds have no console of their own. Borrow the terminal's so Ctrl+C reaches us.
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
         let _ = SetConsoleCtrlHandler(Some(on_ctrl), true);
 
         let mods = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
