@@ -124,6 +124,11 @@ impl Arm {
 
     /// base maps group-local space (origin at the rod's bottom-left, y up) to the target.
     fn parts(&self, pix: &mut PixmapMut, base: Transform, p: &Pose) {
+        self.part(pix, base, p, Part::Rod);
+        self.part(pix, base, p, Part::Hand);
+    }
+
+    fn part(&self, pix: &mut PixmapMut, base: Transform, p: &Pose, part: Part) {
         let a = &self.asset;
         let img = &a.display;
         let (iw, ih) = (img.width() as f32, img.height() as f32);
@@ -131,31 +136,50 @@ impl Arm {
         paint.shader = Pattern::new(img.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, 1.0, Transform::identity());
         paint.anti_alias = true;
         let sx = p.width / iw;
-
         let (v_top, v_wrist, v_end) = (a.hand_top * ih, a.wrist * ih, a.rod_end * ih);
-        let k_rod = p.rod_len / (v_end - v_wrist).max(1.0);
-        let rod = base.pre_concat(Transform::from_row(sx, 0.0, 0.0, -k_rod, 0.0, p.rod_len + k_rod * v_wrist));
-        if let Some(r) = Rect::from_ltrb(0.0, v_wrist - 1.0, iw, v_end.max(v_wrist + 1.0)) {
-            pix.fill_rect(r, &paint, rod, None);
-        }
+        let columns = |(lo, hi): (f32, f32)| ((lo * iw - 2.0).max(0.0), (hi * iw + 2.0).min(iw));
 
-        let k_hand = p.hand_pts / (v_wrist - v_top).max(1.0);
-        let hand = base.pre_concat(Transform::from_row(sx, 0.0, 0.0, -k_hand, 0.0, p.rod_len + p.hand_pts + k_hand * v_top));
-        if let Some(r) = Rect::from_ltrb(0.0, v_top, iw, v_wrist + 1.0) {
-            pix.fill_rect(r, &paint, hand, None);
+        match part {
+            Part::Rod => {
+                let k = p.rod_len / (v_end - v_wrist).max(1.0);
+                let ts = base.pre_concat(Transform::from_row(sx, 0.0, 0.0, -k, 0.0, p.rod_len + k * v_wrist));
+                let (l, r) = columns((a.rod_min_x, a.rod_max_x));
+                if let Some(rect) = Rect::from_ltrb(l, v_wrist - 1.0, r, v_end.max(v_wrist + 1.0)) {
+                    pix.fill_rect(rect, &paint, ts, None);
+                }
+            }
+            Part::Hand => {
+                let k = p.hand_pts / (v_wrist - v_top).max(1.0);
+                let ts = base.pre_concat(Transform::from_row(sx, 0.0, 0.0, -k, 0.0, p.rod_len + p.hand_pts + k * v_top));
+                let (l, r) = columns(a.hand_columns());
+                if let Some(rect) = Rect::from_ltrb(l, v_top, r, v_wrist + 1.0) {
+                    pix.fill_rect(rect, &paint, ts, None);
+                }
+            }
         }
     }
 
-    /// Blurred in unrotated local space, where the buffer is small, then rotated into place.
+    /// One shadow per piece, like the Mac layers, each in a buffer cropped to just that piece.
     fn draw_shadow(&self, pix: &mut PixmapMut, p: &Pose, base: Transform) {
-        let pad = (p.blur * 2.0).ceil() as i32 + 2;
-        let top = p.rod_len + p.hand_pts;
+        let a = &self.asset;
+        let (hand_l, hand_r) = a.hand_columns();
+        for (part, cols, rows) in [
+            (Part::Rod, (a.rod_min_x, a.rod_max_x), (0.0, p.rod_len)),
+            (Part::Hand, (hand_l, hand_r), (p.rod_len, p.rod_len + p.hand_pts)),
+        ] {
+            self.shadow_piece(pix, p, base, part, (cols.0 * p.width, cols.1 * p.width), rows);
+        }
+    }
+
+    /// Drawn and blurred at reduced size in unrotated local space, then rotated into place.
+    fn shadow_piece(&self, pix: &mut PixmapMut, p: &Pose, base: Transform, part: Part, x: (f32, f32), y: (f32, f32)) {
+        let pad = (p.blur * 2.0).ceil() + 2.0;
+        let (x0, x1, y0, y1) = (x.0 - pad, x.1 + pad, y.0 - pad, y.1 + pad);
         let k = SHADOW_SCALE;
-        let w = (((p.width.ceil() as i32 + 2 * pad) as f32 * k).ceil() as u32).max(1);
-        let h = (((top.ceil() as i32 + 2 * pad) as f32 * k).ceil() as u32).max(1);
+        let (w, h) = ((((x1 - x0) * k).ceil() as u32).max(1), (((y1 - y0) * k).ceil() as u32).max(1));
         let Some(mut sil) = Pixmap::new(w, h) else { return };
-        let to_buf = Transform::from_scale(k, k).pre_concat(Transform::from_row(1.0, 0.0, 0.0, -1.0, pad as f32, top + pad as f32));
-        self.parts(&mut sil.as_mut(), to_buf, p);
+        let to_buf = Transform::from_row(k, 0.0, 0.0, -k, -x0 * k, y1 * k);
+        self.part(&mut sil.as_mut(), to_buf, p, part);
 
         let mut alpha: Vec<u8> = sil.data().chunks_exact(4).map(|px| px[3]).collect();
         let radius = (p.blur / 2.0 * k).round().max(1.0) as usize;
@@ -165,10 +189,16 @@ impl Arm {
         }
 
         let offset = Transform::from_translate(p.lift * 0.6, p.lift);
-        let from_buf = Transform::from_row(1.0 / k, 0.0, 0.0, -1.0 / k, -pad as f32, top + pad as f32);
+        let from_buf = Transform::from_row(1.0 / k, 0.0, 0.0, -1.0 / k, x0, y1);
         let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
         pix.draw_pixmap(0, 0, sil.as_ref(), &paint, offset.pre_concat(base).pre_concat(from_buf), None);
     }
+}
+
+#[derive(Clone, Copy)]
+enum Part {
+    Rod,
+    Hand,
 }
 
 fn pass(src: &[u8], dst: &mut [u8], lines: usize, len: usize, line_step: usize, step: usize, r: usize) {

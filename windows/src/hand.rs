@@ -38,9 +38,16 @@ pub struct HandAsset {
     pub rod_x: f32,
     min_x: f32,
     max_x: f32,
+    /// Columns that actually hold the stick, so thin parts are not painted full width.
+    pub rod_min_x: f32,
+    pub rod_max_x: f32,
 }
 
 impl HandAsset {
+    pub fn hand_columns(&self) -> (f32, f32) {
+        (self.min_x, self.max_x)
+    }
+
     /// Square crop of just the hand, for toolbar buttons.
     pub fn thumbnail(&self, px: u32) -> Pixmap {
         let (w, h) = (self.full.width() as f32, self.full.height() as f32);
@@ -75,7 +82,7 @@ impl HandAsset {
     }
 
     fn blank(full: Pixmap) -> Self {
-        Self { display: full.clone(), full, aspect: 0.0, hand_top: 0.0, tip: 0.0, wrist: 0.0, rod_end: 0.0, tip_x: 0.5, rod_x: 0.5, min_x: 0.0, max_x: 1.0 }
+        Self { display: full.clone(), full, aspect: 0.0, hand_top: 0.0, tip: 0.0, wrist: 0.0, rod_end: 0.0, tip_x: 0.5, rod_x: 0.5, min_x: 0.0, max_x: 1.0, rod_min_x: 0.0, rod_max_x: 1.0 }
     }
 }
 
@@ -118,6 +125,9 @@ fn measure(p: &Pixmap) -> Option<HandAsset> {
     let xs = || (top..wrist).flat_map(|y| (0..w).filter(move |&x| solid(x, y)));
     asset.min_x = xs().min().unwrap_or(0) as f32 / w as f32;
     asset.max_x = xs().max().unwrap_or(w - 1) as f32 / w as f32;
+    let rod_rows = || (wrist..=rod_end.min(h - 1)).flat_map(|y| (0..w).filter(move |&x| solid(x, y)));
+    asset.rod_min_x = rod_rows().min().unwrap_or(0) as f32 / w as f32;
+    asset.rod_max_x = (rod_rows().max().unwrap_or(w - 1) + 1) as f32 / w as f32;
     Some(asset)
 }
 

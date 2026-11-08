@@ -47,6 +47,7 @@ const CMD_THROUGH: usize = 3;
 static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 
 const TIMER_INITIAL: usize = 3;
+const TIMER_RAISE: usize = 4;
 const PINNED: [&str; 6] = ["lavender", "glove", "coral", "plush", "robot", "laser"];
 
 struct App {
@@ -94,6 +95,7 @@ unsafe extern "system" fn on_foreground(_: HWINEVENTHOOK, _: u32, hwnd: HWND, _:
     APP.with(|cell| {
         if let Some(app) = cell.try_borrow_mut().ok().as_mut().and_then(|s| s.as_mut()) {
             app.set_suspended(yielding);
+            app.raise();
         }
     });
 }
@@ -152,6 +154,7 @@ impl App {
             let _ = RegisterHotKey(Some(self.hwnd), HK_ESC, MOD_NOREPEAT, VK_ESCAPE.0 as u32);
             SetTimer(Some(self.hwnd), TIMER_TASKBAR, 500, None);
             SetTimer(Some(self.hwnd), TIMER_INITIAL, 3000, None);
+            SetTimer(Some(self.hwnd), TIMER_RAISE, 250, None);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
         sound::open();
@@ -212,9 +215,23 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_TASKBAR);
             let _ = KillTimer(Some(self.hwnd), TIMER_INITIAL);
+            let _ = KillTimer(Some(self.hwnd), TIMER_RAISE);
             let _ = UnregisterHotKey(Some(self.hwnd), HK_ESC);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
+    }
+
+    /// Some windows (Paint) open above even topmost windows, which hides the hand
+    /// while the real cursor is already blanked. Put both back on top, toolbar last.
+    fn raise(&self) {
+        if !self.active || self.suspended {
+            return;
+        }
+        let place = |hwnd: HWND| unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        };
+        place(self.hwnd);
+        place(self.toolbar.hwnd);
     }
 
     fn refresh_taskbar(&self) {
@@ -247,6 +264,7 @@ impl App {
                 self.initial = false;
                 self.toolbar.set_wanted(self.near);
             }
+            WM_TIMER if wp.0 == TIMER_RAISE => self.raise(),
             WM_TIMER => self.refresh_taskbar(),
             hook::WM_REPLAY_CLICK => hook::send_click(lp, wp.0),
             hook::WM_REPLAY_KEY => hook::send_alt_and_key(wp.0, lp),
