@@ -47,8 +47,11 @@ impl SettingsWindow {
                     return None;
                 }
             };
+            for (kind, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
+                let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(crate::icon::logo_for(metric).0 as isize)));
+            }
             let webview = WebViewBuilder::new()
-                .with_html(PAGE)
+                .with_html(PAGE.replace("__LOGO__", &crate::icon::data_url()))
                 .with_ipc_handler(move |request| on_message(request.into_body()))
                 .with_bounds(Rect { position: PhysicalPosition::new(0, 0).into(), size: PhysicalSize::new(client_w as u32, client_h as u32).into() })
                 .build_as_child(&Parent(hwnd));

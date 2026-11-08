@@ -5,6 +5,7 @@ mod config;
 mod cursor;
 mod hand;
 mod hook;
+mod icon;
 mod log;
 mod monitor;
 mod prefs;
@@ -549,7 +550,7 @@ fn add_tray(hwnd: HWND) {
     let mut nid = tray_data(hwnd);
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() };
+    nid.hIcon = icon::logo_for(SM_CXSMICON);
     for (d, s) in nid.szTip.iter_mut().zip("TinyHand".encode_utf16()) {
         *d = s;
     }

@@ -19,6 +19,7 @@
     --accent-ink: #ffffff;
     --track: #c9c9d1;
     --shadow: 0 1px 2px rgba(20, 20, 40, 0.06);
+    --logo: url(__LOGO__);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -57,7 +58,8 @@
     gap: 2px;
   }
   nav .brand { display: flex; align-items: center; gap: 8px; padding: 6px 10px 18px; font-weight: 600; font-size: 15px; }
-  nav .brand i { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); display: grid; place-items: center; color: var(--accent-ink); font-style: normal; font-size: 13px; }
+  .logo { display: block; background: var(--logo) center / contain no-repeat; flex: none; }
+  nav .brand .logo { width: 26px; height: 26px; }
   nav button {
     all: unset;
     display: flex;
@@ -105,7 +107,7 @@
   .kbd { display: inline-flex; gap: 4px; flex: none; }
   .kbd kbd { font: 600 12px "Segoe UI", sans-serif; padding: 3px 8px; border-radius: 6px; background: var(--hover); border: 1px solid var(--line); border-bottom-width: 2px; }
   .about { text-align: center; padding: 28px 16px; }
-  .about .mark { width: 72px; height: 72px; border-radius: 18px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 36px; margin: 0 auto 12px; }
+  .about .logo { width: 84px; height: 84px; margin: 0 auto 12px; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.28)); }
   .about h2 { margin: 0; font-size: 20px; }
   .about p { color: var(--muted); margin: 6px 0 0; }
   a.link { color: var(--accent); text-decoration: none; cursor: pointer; font-weight: 600; }
@@ -193,7 +195,7 @@ const PAGES = {
 
   about: () => `
     <div class="card about">
-      <div class="mark">&#9757;</div>
+      <div class="logo" role="img" aria-label="TinyHand logo"></div>
       <h2>TinyHand for Windows</h2>
       <p>Version ${esc(S.version)}</p>
       <p>A tiny hand on a stick that points at things on your screen.</p>
@@ -208,7 +210,7 @@ const PAGES = {
 
 function render() {
   if (!S) return;
-  $('#nav').innerHTML = `<div class="brand"><i>&#9757;</i>TinyHand</div>` + SECTIONS.map(([id, name]) =>
+  $('#nav').innerHTML = `<div class="brand"><span class="logo" role="img" aria-label="TinyHand"></span>TinyHand</div>` + SECTIONS.map(([id, name]) =>
     `<button data-page="${id}" ${id === page ? 'aria-current="page"' : ''}>${ICONS[id]}${name}</button>`).join('');
   const title = SECTIONS.find(([id]) => id === page)[1];
   $('#page').innerHTML = `<h1>${title}</h1>${PAGES[page]()}`;
