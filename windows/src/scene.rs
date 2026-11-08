@@ -101,6 +101,10 @@ impl Ink {
         }
     }
 
+    pub fn set_color(&mut self, rgb: u32) {
+        self.color = px((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255);
+    }
+
     pub fn is_drawing(&self) -> bool {
         self.drawing
     }

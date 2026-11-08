@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod arm;
 mod cursor;
+mod hand;
 mod hook;
 mod renderer;
 mod scene;
+mod styles;
 mod surface;
 
 use std::cell::RefCell;
@@ -289,7 +292,9 @@ fn main() {
         let off = BOOL(1);
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, (&raw const off).cast(), size_of::<BOOL>() as u32);
 
-        let renderer = Arc::new(Mutex::new(Renderer::new(hwnd, w, h)));
+        let id = std::env::args().nth(1).unwrap_or_else(|| "lavender".into());
+        let (style, ink) = styles::load(&id);
+        let renderer = Arc::new(Mutex::new(Renderer::new(hwnd, w, h, style, ink)));
         APP.with(|a| *a.borrow_mut() = Some(App { hwnd, renderer: renderer.clone(), active: false, suspended: false }));
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT);
         hook::init();

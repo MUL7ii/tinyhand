@@ -11,9 +11,12 @@ use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW};
 
 use crate::hook;
 use crate::scene::{Ink, Pending, Rc, draw_laser, union_opt};
+use crate::styles::Style;
 use crate::surface::Surface;
 
 const DRAG_THRESHOLD: f32 = 4.0;
+const POINTER_SIZE: f32 = 0.13;
+const TICK_HZ: f32 = 120.0;
 
 pub enum Next {
     Frame,
@@ -24,8 +27,10 @@ pub struct Renderer {
     hwnd: HWND,
     surface: Surface,
     ink: Ink,
+    style: Style,
     cursor: (f32, f32),
-    dot: Option<(f32, f32, f32)>,
+    key: Vec<i32>,
+    shape: Option<Rc>,
     down_at: (f32, f32),
     press: f32,
     held: bool,
@@ -47,13 +52,17 @@ fn cursor_pos() -> (f32, f32) {
 }
 
 impl Renderer {
-    pub fn new(hwnd: HWND, w: i32, h: i32) -> Self {
+    pub fn new(hwnd: HWND, w: i32, h: i32, style: Style, ink_rgb: u32) -> Self {
+        let mut ink = Ink::new(w, h);
+        ink.set_color(ink_rgb);
         Self {
             hwnd,
             surface: Surface::new(w, h),
-            ink: Ink::new(w, h),
+            ink,
+            style,
             cursor: (0.0, 0.0),
-            dot: None,
+            key: vec![],
+            shape: None,
             down_at: (0.0, 0.0),
             press: 0.0,
             held: false,
@@ -69,7 +78,8 @@ impl Renderer {
         self.surface.clear();
         self.ink.clear();
         self.ink.take_dirty();
-        self.dot = None;
+        self.key.clear();
+        self.shape = None;
         self.press = 0.0;
         self.held = false;
         self.cursor = cursor_pos();
@@ -116,14 +126,14 @@ impl Renderer {
                 self.ink.extend(at);
             }
         } else if self.press > 0.002 {
-            self.press *= 0.82f32.powf(dt / 0.016);
+            self.press *= 0.82f32.powf(dt * TICK_HZ);
             busy = true;
         } else {
             self.press = 0.0;
         }
         busy |= self.ink.tick();
 
-        self.draw(at);
+        busy |= self.draw(at, dt);
 
         if busy {
             return Next::Frame;
@@ -135,24 +145,35 @@ impl Renderer {
         }
     }
 
-    fn draw(&mut self, at: (f32, f32)) {
+    /// Returns true while the pointer is still easing toward its target.
+    fn draw(&mut self, at: (f32, f32), dt: f32) -> bool {
         let (w, h) = (self.surface.w, self.surface.h);
-        let r = (h as f32 * 0.0038).max(4.0) * (1.0 + 0.2 * self.press);
-        let dot = (at.0, at.1, r);
-        let dot_moved = self.dot != Some(dot);
-        let ink_dirty = self.ink.take_dirty();
-        if !dot_moved && ink_dirty.is_none() {
-            return;
-        }
+        let screen = (w as f32, h as f32);
 
-        let reach = r * 3.2 + 3.0;
-        let now = Rc::around(at.0, at.1, reach);
-        let mut dirty = union_opt(ink_dirty, now);
-        if let Some(p) = self.dot {
-            dirty = dirty.union(Rc::around(p.0, p.1, p.2 * 3.2 + 3.0));
+        let mut pose = None;
+        let (key, shape, settling) = match &mut self.style {
+            Style::Hand(arm) => {
+                let p = arm.aim(at, screen, self.press, POINTER_SIZE, dt);
+                pose = Some(p);
+                (p.key(), arm.bbox(&p, screen.1), arm.settling())
+            }
+            Style::Laser => {
+                let r = laser_radius(screen.1, self.press);
+                (vec![at.0 as i32 * 100, at.1 as i32 * 100, (r * 100.0) as i32], Rc::around(at.0, at.1, r * 3.2 + 3.0), false)
+            }
+        };
+
+        let ink_dirty = self.ink.take_dirty();
+        if key == self.key && ink_dirty.is_none() {
+            return settling;
         }
-        self.dot = Some(dot);
-        let Some(d) = dirty.clip(w, h) else { return };
+        let mut dirty = union_opt(ink_dirty, shape);
+        if let Some(prev) = self.shape {
+            dirty = dirty.union(prev);
+        }
+        self.key = key;
+        self.shape = Some(shape);
+        let Some(d) = dirty.clip(w, h) else { return settling };
 
         let stride = w as usize * 4;
         let src = self.ink.layer.data();
@@ -162,9 +183,13 @@ impl Renderer {
             dst[range.clone()].copy_from_slice(&src[range]);
         }
         if let Some(mut pix) = PixmapMut::from_bytes(self.surface.bytes_mut(), w as u32, h as u32) {
-            draw_laser(&mut pix, at, r);
+            match (&self.style, pose) {
+                (Style::Hand(arm), Some(p)) => arm.draw(&mut pix, &p, screen.1),
+                _ => draw_laser(&mut pix, at, laser_radius(screen.1, self.press)),
+            }
         }
         self.drew = true;
+        settling
     }
 
     pub fn present(&self) {
@@ -174,6 +199,10 @@ impl Renderer {
     pub fn hwnd_raw(&self) -> isize {
         self.hwnd.0 as isize
     }
+}
+
+fn laser_radius(screen_h: f32, press: f32) -> f32 {
+    (screen_h * 0.0038).max(4.0) * (1.0 + 0.2 * press)
 }
 
 pub fn lock(r: &Mutex<Renderer>) -> MutexGuard<'_, Renderer> {
