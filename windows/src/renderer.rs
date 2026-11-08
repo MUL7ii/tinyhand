@@ -10,7 +10,7 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW};
 
 use crate::hook;
-use crate::scene::{Ink, Pending, Rc, draw_laser, union_opt};
+use crate::scene::{Ink, Pending, Rc, draw_laser};
 use crate::styles::Style;
 use crate::toolbar::WM_TB_WANT;
 use crate::surface::Surface;
@@ -182,17 +182,20 @@ impl Renderer {
             }
         };
 
+        // Holding Alt shows the real cursor, so the pointer steps out of the way.
+        let hidden = hook::INTERACT.load(Relaxed);
+        let mut key = key;
+        key.push(hidden as i32);
+        let shape = (!hidden).then_some(shape);
+
         let ink_dirty = self.ink.take_dirty();
         if key == self.key && ink_dirty.is_none() {
             return settling;
         }
-        let mut dirty = union_opt(ink_dirty, shape);
-        if let Some(prev) = self.shape {
-            dirty = dirty.union(prev);
-        }
+        let dirty = [ink_dirty, shape, self.shape].into_iter().flatten().reduce(Rc::union);
         self.key = key;
-        self.shape = Some(shape);
-        let Some(d) = dirty.clip(w, h) else { return settling };
+        self.shape = shape;
+        let Some(d) = dirty.and_then(|d| d.clip(w, h)) else { return settling };
 
         let stride = w as usize * 4;
         let src = self.ink.layer.data();
@@ -200,6 +203,10 @@ impl Renderer {
         for y in d.t as usize..d.b as usize {
             let range = y * stride + d.l as usize * 4..y * stride + d.r as usize * 4;
             dst[range.clone()].copy_from_slice(&src[range]);
+        }
+        if hidden {
+            self.drew = true;
+            return settling;
         }
         if let Some(mut pix) = PixmapMut::from_bytes(self.surface.bytes_mut(), w as u32, h as u32) {
             match (&self.style, pose) {

@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering:
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
@@ -67,6 +68,75 @@ fn in_passthrough(p: POINT) -> bool {
     PASS.iter().any(|r| p.x >= r[0].load(Relaxed) && p.y >= r[1].load(Relaxed) && p.x < r[2].load(Relaxed) && p.y < r[3].load(Relaxed))
 }
 
+/// Alt is held to click for real. The key is hidden from apps while it is.
+pub const WM_INTERACT: u32 = WM_APP + 4;
+pub static INTERACT: AtomicBool = AtomicBool::new(false);
+/// Alt joined another key (Alt+Tab), so it was handed back to the app.
+static PASSED: AtomicBool = AtomicBool::new(false);
+static TARGET: AtomicIsize = AtomicIsize::new(0);
+
+pub fn reset_keys() {
+    INTERACT.store(false, Relaxed);
+    PASSED.store(false, Relaxed);
+}
+
+fn post_interact(on: bool) {
+    let hwnd = HWND(TARGET.load(Relaxed) as *mut c_void);
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_INTERACT, WPARAM(on as usize), LPARAM(0));
+    }
+    wake();
+}
+
+fn key_input(vk: u32, scan: u32, extended: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk as u16),
+                wScan: scan as u16,
+                dwFlags: if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+unsafe extern "system" fn key_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 && ACTIVE.load(Relaxed) {
+        let k = unsafe { &*(lp.0 as *const KBDLLHOOKSTRUCT) };
+        if k.flags.0 & LLKHF_INJECTED.0 == 0 {
+            let msg = wp.0 as u32;
+            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            let is_alt = [VK_LMENU, VK_RMENU, VK_MENU].iter().any(|v| v.0 as u32 == k.vkCode);
+            if is_alt && down && !PASSED.load(Relaxed) {
+                if !INTERACT.swap(true, Relaxed) {
+                    post_interact(true);
+                }
+                return LRESULT(1);
+            }
+            if is_alt && !down && !PASSED.swap(false, Relaxed) && INTERACT.swap(false, Relaxed) {
+                post_interact(false);
+                return LRESULT(1);
+            }
+            if !is_alt && down && INTERACT.load(Relaxed) && !PASSED.load(Relaxed) {
+                // Give the app its Alt back, then the key, in order.
+                PASSED.store(true, Relaxed);
+                INTERACT.store(false, Relaxed);
+                post_interact(false);
+                let extended = k.flags.0 & LLKHF_EXTENDED.0 != 0;
+                let inputs = [key_input(VK_MENU.0 as u32, 0, false), key_input(k.vkCode, k.scanCode, extended)];
+                unsafe {
+                    SendInput(&inputs, size_of::<INPUT>() as i32);
+                }
+                return LRESULT(1);
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wp, lp) }
+}
+
 unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 && ACTIVE.load(Relaxed) {
         let info = unsafe { &*(lp.0 as *const MSLLHOOKSTRUCT) };
@@ -78,7 +148,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         } else if info.flags & LLMHF_INJECTED == 0 {
             match msg {
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
-                    if !in_passthrough(info.pt) {
+                    if !INTERACT.load(Relaxed) && !in_passthrough(info.pt) {
                         SWALLOWED.store(true, Relaxed);
                         DOWN_X.store(info.pt.x, Relaxed);
                         DOWN_Y.store(info.pt.y, Relaxed);
@@ -105,12 +175,14 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 }
 
 /// Own thread, so the callback never waits on rendering.
-pub fn start() {
+pub fn start(target: HWND) {
+    TARGET.store(target.0 as isize, Relaxed);
     std::thread::spawn(|| unsafe {
         let hinst = GetModuleHandleW(None).map(|m| HINSTANCE(m.0)).ok();
         if SetWindowsHookExW(WH_MOUSE_LL, Some(proc), hinst, 0).is_err() {
             return;
         }
+        let _ = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_proc), hinst, 0);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);

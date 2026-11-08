@@ -139,6 +139,7 @@ impl App {
     fn start(&mut self) {
         lock(&self.renderer).reset();
         self.refresh_taskbar();
+        hook::reset_keys();
         hook::HELD.store(false, Relaxed);
         hook::ACTIVE.store(true, Relaxed);
         cursor::hide();
@@ -166,6 +167,7 @@ impl App {
     fn stop(&mut self) {
         hook::ACTIVE.store(false, Relaxed);
         hook::HELD.store(false, Relaxed);
+        hook::reset_keys();
         cursor::restore();
         lock(&self.renderer).reset();
         self.toolbar.hide();
@@ -206,6 +208,15 @@ impl App {
                 self.toolbar.set_wanted(self.near);
             }
             WM_TIMER => self.refresh_taskbar(),
+            hook::WM_INTERACT => {
+                if self.active && !self.suspended {
+                    if wp.0 != 0 {
+                        cursor::restore();
+                    } else {
+                        cursor::hide();
+                    }
+                }
+            }
             toolbar::WM_TB_WANT => {
                 self.near = wp.0 != 0;
                 if self.active && !self.suspended {
@@ -377,7 +388,7 @@ fn main() {
         APP.with(|a| *a.borrow_mut() = Some(app));
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT);
         hook::init();
-        hook::start();
+        hook::start(hwnd);
         std::thread::spawn(move || renderer::run(renderer));
         add_tray(hwnd);
         // Release builds have no console of their own. Borrow the terminal's so Ctrl+C reaches us.
