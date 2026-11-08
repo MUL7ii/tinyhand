@@ -16,11 +16,13 @@ use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Media::timeBeginPeriod;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{BOOL, PCWSTR, w};
+use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 use renderer::{Renderer, lock};
 
@@ -38,6 +40,43 @@ struct App {
     hwnd: HWND,
     renderer: Arc<Mutex<Renderer>>,
     active: bool,
+    /// A capture tool has focus. TinyHand steps aside until it leaves.
+    suspended: bool,
+}
+
+const YIELD_TO: [&str; 3] = ["screenclippinghost.exe", "snippingtool.exe", "screensketch.exe"];
+
+fn should_yield(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(process);
+        if !ok {
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+        let name = path.rsplit('\\').next().unwrap_or("");
+        YIELD_TO.contains(&name)
+    }
+}
+
+unsafe extern "system" fn on_foreground(_: HWINEVENTHOOK, _: u32, hwnd: HWND, _: i32, _: i32, _: u32, _: u32) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    let yielding = should_yield(hwnd);
+    APP.with(|cell| {
+        if let Some(app) = cell.try_borrow_mut().ok().as_mut().and_then(|s| s.as_mut()) {
+            app.set_suspended(yielding);
+        }
+    });
 }
 
 thread_local! {
@@ -55,6 +94,35 @@ impl App {
 
     fn activate(&mut self) {
         self.active = true;
+        self.suspended = should_yield(unsafe { GetForegroundWindow() });
+        if !self.suspended {
+            self.start();
+        }
+    }
+
+    fn deactivate(&mut self) {
+        let running = self.active && !self.suspended;
+        self.active = false;
+        if running {
+            self.stop();
+        }
+    }
+
+    fn set_suspended(&mut self, suspended: bool) {
+        if suspended == self.suspended {
+            return;
+        }
+        self.suspended = suspended;
+        if self.active {
+            if suspended {
+                self.stop();
+            } else {
+                self.start();
+            }
+        }
+    }
+
+    fn start(&mut self) {
         lock(&self.renderer).reset();
         self.refresh_taskbar();
         hook::HELD.store(false, Relaxed);
@@ -68,8 +136,7 @@ impl App {
         hook::wake();
     }
 
-    fn deactivate(&mut self) {
-        self.active = false;
+    fn stop(&mut self) {
         hook::ACTIVE.store(false, Relaxed);
         hook::HELD.store(false, Relaxed);
         cursor::restore();
@@ -223,7 +290,8 @@ fn main() {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, (&raw const off).cast(), size_of::<BOOL>() as u32);
 
         let renderer = Arc::new(Mutex::new(Renderer::new(hwnd, w, h)));
-        APP.with(|a| *a.borrow_mut() = Some(App { hwnd, renderer: renderer.clone(), active: false }));
+        APP.with(|a| *a.borrow_mut() = Some(App { hwnd, renderer: renderer.clone(), active: false, suspended: false }));
+        SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT);
         hook::init();
         hook::start();
         std::thread::spawn(move || renderer::run(renderer));
