@@ -1,49 +1,43 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cursor;
 mod hook;
+mod renderer;
 mod scene;
 mod surface;
 
 use std::cell::RefCell;
-use std::sync::atomic::Ordering::Relaxed;
-use std::time::Instant;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::UpdateWindow;
+use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Media::timeBeginPeriod;
+use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, w};
+use windows::core::{BOOL, PCWSTR, w};
 
-use scene::{Ink, draw_laser};
-use surface::Surface;
+use renderer::{Renderer, lock};
 
-const TIMER: usize = 1;
-const FRAME_MS: u32 = 8;
+const TIMER_TASKBAR: usize = 1;
 const HK_TOGGLE: i32 = 1;
 const HK_CLEAR: i32 = 2;
 const HK_ESC: i32 = 3;
 const WM_TRAY: u32 = WM_APP + 10;
 const CMD_TOGGLE: usize = 1;
 const CMD_QUIT: usize = 2;
-const DRAG_THRESHOLD: f32 = 4.0;
+
+static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 
 struct App {
     hwnd: HWND,
-    surface: Surface,
-    ink: Ink,
+    renderer: Arc<Mutex<Renderer>>,
     active: bool,
-    held: bool,
-    down_at: (f32, f32),
-    cursor: (f32, f32),
-    press: f32,
-    dirty: bool,
-    last_frame: Instant,
-    last_taskbar: Instant,
 }
 
 thread_local! {
@@ -51,24 +45,6 @@ thread_local! {
 }
 
 impl App {
-    fn new(hwnd: HWND, w: i32, h: i32) -> Self {
-        let mut ink = Ink::new();
-        ink.width = (h as f32 * 0.0055).max(3.0);
-        Self {
-            hwnd,
-            surface: Surface::new(w, h),
-            ink,
-            active: false,
-            held: false,
-            down_at: (0.0, 0.0),
-            cursor: (0.0, 0.0),
-            press: 0.0,
-            dirty: true,
-            last_frame: Instant::now(),
-            last_taskbar: Instant::now() - std::time::Duration::from_secs(10),
-        }
-    }
-
     fn toggle(&mut self) {
         if self.active {
             self.deactivate();
@@ -79,34 +55,33 @@ impl App {
 
     fn activate(&mut self) {
         self.active = true;
+        lock(&self.renderer).reset();
         self.refresh_taskbar();
+        hook::HELD.store(false, Relaxed);
         hook::ACTIVE.store(true, Relaxed);
         cursor::hide();
         unsafe {
             let _ = RegisterHotKey(Some(self.hwnd), HK_ESC, MOD_NOREPEAT, VK_ESCAPE.0 as u32);
+            SetTimer(Some(self.hwnd), TIMER_TASKBAR, 500, None);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            SetTimer(Some(self.hwnd), TIMER, FRAME_MS, None);
         }
-        self.last_frame = Instant::now();
-        self.dirty = true;
-        self.tick();
+        hook::wake();
     }
 
     fn deactivate(&mut self) {
         self.active = false;
-        self.held = false;
         hook::ACTIVE.store(false, Relaxed);
-        self.ink.clear();
+        hook::HELD.store(false, Relaxed);
         cursor::restore();
+        lock(&self.renderer).reset();
         unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER);
+            let _ = KillTimer(Some(self.hwnd), TIMER_TASKBAR);
             let _ = UnregisterHotKey(Some(self.hwnd), HK_ESC);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
 
-    fn refresh_taskbar(&mut self) {
-        self.last_taskbar = Instant::now();
+    fn refresh_taskbar(&self) {
         let mut r = RECT::default();
         unsafe {
             if let Ok(bar) = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) {
@@ -116,73 +91,14 @@ impl App {
         hook::set_passthrough(r);
     }
 
-    fn tick(&mut self) {
-        if !self.active {
-            return;
-        }
-        if self.last_taskbar.elapsed().as_millis() > 500 {
-            self.refresh_taskbar();
-        }
-        let dt = self.last_frame.elapsed().as_secs_f32();
-        self.last_frame = Instant::now();
-
-        let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
-        let at = (p.x as f32, p.y as f32);
-        if at != self.cursor {
-            self.cursor = at;
-            self.dirty = true;
-        }
-
-        if self.held {
-            if self.ink.is_drawing() {
-                self.ink.extend(at);
-            } else if (at.0 - self.down_at.0).hypot(at.1 - self.down_at.1) >= DRAG_THRESHOLD {
-                self.ink.begin(self.down_at);
-                self.ink.extend(at);
-            }
-        } else if self.press > 0.002 {
-            self.press *= 0.82f32.powf(dt / 0.016);
-            self.dirty = true;
-        }
-
-        if self.dirty || self.ink.alive() {
-            self.render();
-            self.dirty = false;
-        }
-    }
-
-    fn render(&mut self) {
-        let pix = &mut self.surface.pix;
-        pix.fill(tiny_skia::Color::TRANSPARENT);
-        self.ink.draw(pix);
-        let h = self.surface.size().1 as f32;
-        let r = (h * 0.0038).max(4.0) * (1.0 + 0.2 * self.press);
-        draw_laser(&mut self.surface.pix, self.cursor, r);
-        self.surface.present(self.hwnd);
-    }
-
     fn on_message(&mut self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match msg {
-            WM_TIMER => self.tick(),
-            hook::WM_TH_DOWN => {
-                self.held = true;
-                self.press = 1.0;
-                self.down_at = self.cursor;
-                self.dirty = true;
-            }
-            hook::WM_TH_UP => {
-                self.held = false;
-                self.ink.end();
-                self.dirty = true;
-            }
+            WM_TIMER => self.refresh_taskbar(),
             WM_HOTKEY => match wp.0 as i32 {
                 HK_TOGGLE => self.toggle(),
                 HK_CLEAR => {
-                    self.ink.clear();
-                    self.dirty = true;
+                    lock(&self.renderer).clear_ink();
+                    hook::wake();
                 }
                 HK_ESC => self.deactivate(),
                 _ => {}
@@ -226,16 +142,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     handled.unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wp, lp) })
 }
 
+fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: 1, ..Default::default() }
+}
+
 fn add_tray(hwnd: HWND) {
-    let mut nid = NOTIFYICONDATAW {
-        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-        hWnd: hwnd,
-        uID: 1,
-        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
-        uCallbackMessage: WM_TRAY,
-        hIcon: unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() },
-        ..Default::default()
-    };
+    let mut nid = tray_data(hwnd);
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAY;
+    nid.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() };
     for (d, s) in nid.szTip.iter_mut().zip("TinyHand".encode_utf16()) {
         *d = s;
     }
@@ -245,10 +160,16 @@ fn add_tray(hwnd: HWND) {
 }
 
 fn remove_tray(hwnd: HWND) {
-    let nid = NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: 1, ..Default::default() };
     unsafe {
-        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+        let _ = Shell_NotifyIconW(NIM_DELETE, &tray_data(hwnd));
     }
+}
+
+/// Ctrl+C in a dev console: put the cursors back before dying.
+unsafe extern "system" fn on_ctrl(_: u32) -> BOOL {
+    cursor::restore();
+    remove_tray(HWND(HWND_RAW.load(Relaxed) as *mut c_void));
+    std::process::exit(0)
 }
 
 fn main() {
@@ -289,11 +210,19 @@ fn main() {
             None,
         )
         .expect("overlay window");
-        let _ = UpdateWindow(hwnd);
+        HWND_RAW.store(hwnd.0 as isize, Relaxed);
 
-        APP.with(|a| *a.borrow_mut() = Some(App::new(hwnd, w, h)));
-        hook::start(hwnd);
+        // Without this the shell fades the window out on hide, leaving old ink on screen.
+        let off = BOOL(1);
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, (&raw const off).cast(), size_of::<BOOL>() as u32);
+
+        let renderer = Arc::new(Mutex::new(Renderer::new(hwnd, w, h)));
+        APP.with(|a| *a.borrow_mut() = Some(App { hwnd, renderer: renderer.clone(), active: false }));
+        hook::init();
+        hook::start();
+        std::thread::spawn(move || renderer::run(renderer));
         add_tray(hwnd);
+        let _ = SetConsoleCtrlHandler(Some(on_ctrl), true);
 
         let mods = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
         let _ = RegisterHotKey(Some(hwnd), HK_TOGGLE, mods, 'H' as u32);

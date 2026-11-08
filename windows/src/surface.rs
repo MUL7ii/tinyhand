@@ -1,18 +1,16 @@
 use std::ffi::c_void;
 use std::ptr::null_mut;
 
-use tiny_skia::Pixmap;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Software canvas blitted to a layered window with per-pixel alpha.
+/// Layered-window backing store. Pixels are premultiplied BGRA.
 pub struct Surface {
-    pub pix: Pixmap,
-    w: i32,
-    h: i32,
+    pub w: i32,
+    pub h: i32,
     dc: HDC,
-    bits: *mut u32,
+    bits: *mut u8,
 }
 
 impl Surface {
@@ -36,28 +34,49 @@ impl Surface {
             let bmp = CreateDIBSection(Some(screen), &bmi, DIB_RGB_COLORS, &mut bits, None, 0).expect("DIB section");
             SelectObject(dc, bmp.into());
             ReleaseDC(None, screen);
-            Self { pix: Pixmap::new(w as u32, h as u32).expect("pixmap"), w, h, dc, bits: bits.cast() }
+            Self { w, h, dc, bits: bits.cast() }
         }
     }
 
-    pub fn size(&self) -> (i32, i32) {
-        (self.w, self.h)
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.bits, self.w as usize * self.h as usize * 4) }
     }
 
-    pub fn present(&mut self, hwnd: HWND) {
-        let src = self.pix.data();
-        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits.cast::<u8>(), src.len()) };
-        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-            d[0] = s[2];
-            d[1] = s[1];
-            d[2] = s[0];
-            d[3] = s[3];
-        }
-        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+    pub fn clear(&mut self) {
+        self.bytes_mut().fill(0);
+    }
+
+    fn blend() -> BLENDFUNCTION {
+        BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 }
+    }
+
+    /// Sets position and size as well. Window thread only.
+    pub fn present_full(&self, hwnd: HWND) {
         let origin = POINT::default();
         let size = SIZE { cx: self.w, cy: self.h };
         unsafe {
-            let _ = UpdateLayeredWindow(hwnd, None, Some(&origin), Some(&size), Some(self.dc), Some(&origin), COLORREF(0), Some(&blend), ULW_ALPHA);
+            let _ = UpdateLayeredWindow(hwnd, None, Some(&origin), Some(&size), Some(self.dc), Some(&origin), COLORREF(0), Some(&Self::blend()), ULW_ALPHA);
+        }
+    }
+
+    /// Content only, so it is safe from any thread.
+    pub fn present_rect(&self, hwnd: HWND, dirty: RECT) {
+        let origin = POINT::default();
+        let blend = Self::blend();
+        let info = UPDATELAYEREDWINDOWINFO {
+            cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+            hdcDst: HDC::default(),
+            pptDst: std::ptr::null(),
+            psize: std::ptr::null(),
+            hdcSrc: self.dc,
+            pptSrc: &origin,
+            crKey: COLORREF(0),
+            pblend: &blend,
+            dwFlags: ULW_ALPHA,
+            prcDirty: &dirty,
+        };
+        unsafe {
+            let _ = UpdateLayeredWindowIndirect(hwnd, &info);
         }
     }
 }

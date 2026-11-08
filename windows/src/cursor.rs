@@ -31,9 +31,9 @@ pub fn hide() {
     }
 }
 
-/// Reloads the user's cursors from settings. Safe to call at any time.
+/// Reloads the user's cursors. No broadcast: SPIF_SENDCHANGE makes the shell redraw.
 pub fn restore() {
     unsafe {
-        let _ = SystemParametersInfoW(SPI_SETCURSORS, 0, None, SPIF_SENDCHANGE);
+        let _ = SystemParametersInfoW(SPI_SETCURSORS, 0, None, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
     }
 }
