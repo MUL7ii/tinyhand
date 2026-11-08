@@ -26,11 +26,13 @@ const MARGIN_BOTTOM: f32 = 14.0;
 
 pub enum Action {
     Pick(String),
+    ToggleClickThrough,
     Exit,
 }
 
 enum Kind {
     Style(String),
+    ClickThrough,
     Exit,
 }
 
@@ -47,6 +49,7 @@ pub struct Toolbar {
     surface: Surface,
     scale: f32,
     selected: String,
+    through: bool,
     hover: Option<usize>,
     alpha: f32,
     target: f32,
@@ -97,6 +100,8 @@ impl Toolbar {
         }
         let divider_x = x;
         x += (1.0 + GAP) * scale;
+        items.push(Item { kind: Kind::ClickThrough, icon: None, x });
+        x += (BUTTON + GAP) * scale;
         items.push(Item { kind: Kind::Exit, icon: None, x });
         x += (BUTTON + PAD_X) * scale;
 
@@ -108,6 +113,7 @@ impl Toolbar {
             surface: Surface::new(w, h),
             scale,
             selected: selected.to_string(),
+            through: false,
             hover: None,
             alpha: 0.0,
             target: 0.0,
@@ -160,6 +166,11 @@ impl Toolbar {
             let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
+    }
+
+    pub fn set_click_through(&mut self, on: bool) {
+        self.through = on;
+        self.paint();
     }
 
     pub fn select(&mut self, id: &str) {
@@ -225,7 +236,11 @@ impl Toolbar {
 
         let (btn, top) = (BUTTON * s, PAD_Y * s);
         for (i, item) in self.items.iter().enumerate() {
-            let chosen = matches!(&item.kind, Kind::Style(id) if *id == self.selected);
+            let chosen = match &item.kind {
+                Kind::Style(id) => *id == self.selected,
+                Kind::ClickThrough => self.through,
+                Kind::Exit => false,
+            };
             let tint = if chosen { 46 } else if self.hover == Some(i) { 24 } else { 0 };
             if tint > 0 {
                 if let Some(path) = round_rect(item.x, top, btn, btn, 10.0 * s) {
@@ -239,6 +254,22 @@ impl Toolbar {
                     pix.draw_pixmap(ix.round() as i32, iy.round() as i32, icon.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 }
                 (Kind::Style(_), None) => draw_laser(&mut pix, (cx, cy), 5.0 * s),
+                (Kind::ClickThrough, None) => {
+                    let arrow = [(0.0, 0.0), (0.0, 16.0), (4.2, 12.2), (7.0, 18.5), (9.6, 17.4), (6.9, 11.3), (12.4, 11.0)];
+                    let mut pb = PathBuilder::new();
+                    for (i, (ax, ay)) in arrow.iter().enumerate() {
+                        let (px_, py_) = (cx + (ax - 6.0) * s, cy + (ay - 9.0) * s);
+                        if i == 0 {
+                            pb.move_to(px_, py_);
+                        } else {
+                            pb.line_to(px_, py_);
+                        }
+                    }
+                    pb.close();
+                    if let Some(path) = pb.finish() {
+                        fill(&mut pix, &path, px(255, 255, 255, 230));
+                    }
+                }
                 (Kind::Exit, None) => {
                     let d = 6.0 * s;
                     let mut pb = PathBuilder::new();
@@ -307,6 +338,7 @@ impl Toolbar {
                 let (x, y) = point();
                 let action = self.hit(x, y).map(|i| match &self.items[i].kind {
                     Kind::Style(id) => Action::Pick(id.clone()),
+                    Kind::ClickThrough => Action::ToggleClickThrough,
                     Kind::Exit => Action::Exit,
                 });
                 Some((LRESULT(0), action))

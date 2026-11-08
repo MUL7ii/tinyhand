@@ -13,6 +13,8 @@ pub const WM_PRESENT: u32 = WM_APP + 3;
 pub static PRESENT_PENDING: AtomicBool = AtomicBool::new(false);
 pub static ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static HELD: AtomicBool = AtomicBool::new(false);
+/// Clicks reach the apps all the time. The hand still taps and drags still draw.
+pub static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
 /// Set by the render thread while it sleeps. The hook wakes it on mouse moves.
 pub static IDLE: AtomicBool = AtomicBool::new(false);
 pub static DOWN_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -148,22 +150,27 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         } else if info.flags & LLMHF_INJECTED == 0 {
             match msg {
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+                    SWALLOWED.store(false, Relaxed);
                     if !INTERACT.load(Relaxed) && !in_passthrough(info.pt) {
-                        SWALLOWED.store(true, Relaxed);
                         DOWN_X.store(info.pt.x, Relaxed);
                         DOWN_Y.store(info.pt.y, Relaxed);
                         HELD.store(true, Relaxed);
                         DOWN_SEQ.fetch_add(1, Relaxed);
                         wake();
-                        return LRESULT(1);
+                        if !CLICK_THROUGH.load(Relaxed) {
+                            SWALLOWED.store(true, Relaxed);
+                            return LRESULT(1);
+                        }
                     }
-                    SWALLOWED.store(false, Relaxed);
                 }
                 WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
-                    if SWALLOWED.swap(false, Relaxed) {
+                    let swallowed = SWALLOWED.swap(false, Relaxed);
+                    if swallowed || (CLICK_THROUGH.load(Relaxed) && HELD.load(Relaxed)) {
                         HELD.store(false, Relaxed);
                         UP_SEQ.fetch_add(1, Relaxed);
                         wake();
+                    }
+                    if swallowed {
                         return LRESULT(1);
                     }
                 }

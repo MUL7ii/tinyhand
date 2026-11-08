@@ -36,9 +36,11 @@ const TIMER_TASKBAR: usize = 1;
 const HK_TOGGLE: i32 = 1;
 const HK_CLEAR: i32 = 2;
 const HK_ESC: i32 = 3;
+const HK_THROUGH: i32 = 4;
 const WM_TRAY: u32 = WM_APP + 10;
 const CMD_TOGGLE: usize = 1;
 const CMD_QUIT: usize = 2;
+const CMD_THROUGH: usize = 3;
 
 static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 
@@ -156,6 +158,17 @@ impl App {
         hook::wake();
     }
 
+    fn toggle_click_through(&mut self) {
+        let on = !hook::CLICK_THROUGH.load(Relaxed);
+        hook::CLICK_THROUGH.store(on, Relaxed);
+        if hook::HELD.swap(false, Relaxed) {
+            hook::UP_SEQ.fetch_add(1, Relaxed);
+        }
+        self.toolbar.set_click_through(on);
+        prefs::save_click_through(on);
+        hook::wake();
+    }
+
     fn pick(&mut self, id: &str) {
         let (style, ink) = styles::load(id);
         lock(&self.renderer).set_style(style, ink);
@@ -194,6 +207,7 @@ impl App {
             let (result, action) = self.toolbar.handle(msg, wp, lp)?;
             match action {
                 Some(Action::Pick(id)) => self.pick(&id),
+                Some(Action::ToggleClickThrough) => self.toggle_click_through(),
                 Some(Action::Exit) => self.deactivate(),
                 None => {}
             }
@@ -236,6 +250,7 @@ impl App {
                     hook::wake();
                 }
                 HK_ESC => self.deactivate(),
+                HK_THROUGH => self.toggle_click_through(),
                 _ => {}
             },
             WM_TRAY => match (lp.0 as u32) & 0xFFFF {
@@ -245,6 +260,7 @@ impl App {
             },
             WM_COMMAND => match wp.0 & 0xFFFF {
                 CMD_TOGGLE => self.toggle(),
+                CMD_THROUGH => self.toggle_click_through(),
                 CMD_QUIT => unsafe { PostQuitMessage(0) },
                 _ => {}
             },
@@ -258,6 +274,8 @@ impl App {
             let Ok(menu) = CreatePopupMenu() else { return };
             let label = if self.active { w!("Turn pointer off") } else { w!("Turn pointer on") };
             let _ = AppendMenuW(menu, MF_STRING, CMD_TOGGLE, label);
+            let checked = if hook::CLICK_THROUGH.load(Relaxed) { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(menu, MF_STRING | checked, CMD_THROUGH, w!("Click through\tCtrl+Alt+C"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit TinyHand"));
             let mut p = POINT::default();
             let _ = GetCursorPos(&mut p);
@@ -382,7 +400,10 @@ fn main() {
         if !pinned.contains(&id.as_str()) {
             pinned.insert(pinned.len() - 1, &id);
         }
-        let toolbar = Toolbar::new(bar, &pinned, &id);
+        let mut toolbar = Toolbar::new(bar, &pinned, &id);
+        let through = prefs::load_click_through();
+        hook::CLICK_THROUGH.store(through, Relaxed);
+        toolbar.set_click_through(through);
         let renderer = Arc::new(Mutex::new(Renderer::new(hwnd, w, h, style, ink)));
         let app = App { hwnd, renderer: renderer.clone(), toolbar, active: false, suspended: false, near: false, initial: false };
         APP.with(|a| *a.borrow_mut() = Some(app));
@@ -398,6 +419,7 @@ fn main() {
         let mods = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
         let _ = RegisterHotKey(Some(hwnd), HK_TOGGLE, mods, 'H' as u32);
         let _ = RegisterHotKey(Some(hwnd), HK_CLEAR, mods, 'X' as u32);
+        let _ = RegisterHotKey(Some(hwnd), HK_THROUGH, mods, 'C' as u32);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
