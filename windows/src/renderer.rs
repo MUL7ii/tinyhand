@@ -16,6 +16,7 @@ use crate::surface::Surface;
 
 const DRAG_THRESHOLD: f32 = 4.0;
 const POINTER_SIZE: f32 = 0.13;
+const SHADOW: bool = true;
 const TICK_HZ: f32 = 120.0;
 
 pub enum Next {
@@ -184,7 +185,7 @@ impl Renderer {
         }
         if let Some(mut pix) = PixmapMut::from_bytes(self.surface.bytes_mut(), w as u32, h as u32) {
             match (&self.style, pose) {
-                (Style::Hand(arm), Some(p)) => arm.draw(&mut pix, &p, screen.1),
+                (Style::Hand(arm), Some(p)) => arm.draw(&mut pix, &p, screen.1, SHADOW),
                 _ => draw_laser(&mut pix, at, laser_radius(screen.1, self.press)),
             }
         }

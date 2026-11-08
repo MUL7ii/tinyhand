@@ -7,6 +7,7 @@ const MIN_ROD: f32 = 0.05;
 const GRIP_LEAN: f32 = 0.30;
 const GRIP_DEPTH: f32 = 0.12;
 const GRIP_FOLLOW: f32 = 0.08;
+const LIFT: f32 = 0.06;
 /// The follow and press rates were tuned at 120 ticks per second.
 const TICK_HZ: f32 = 120.0;
 
@@ -18,11 +19,17 @@ pub struct Pose {
     hand_pts: f32,
     width: f32,
     grip: (f32, f32),
+    lift: f32,
+    blur: f32,
+    opacity: f32,
 }
 
 impl Pose {
     pub fn key(&self) -> Vec<i32> {
-        [self.rotation, self.rod_len, self.hand_pts, self.width, self.grip.0].iter().map(|v| (v * 100.0).round() as i32).collect()
+        [self.rotation, self.rod_len, self.hand_pts, self.width, self.grip.0, self.lift, self.blur]
+            .iter()
+            .map(|v| (v * 100.0).round() as i32)
+            .collect()
     }
 }
 
@@ -69,7 +76,18 @@ impl Arm {
         let along = (reach * reach - tip_off_x * tip_off_x).max(0.0).sqrt();
         let rod_len = (along - tip_pts).max(MIN_ROD * sh);
         let tip_angle = (rod_len + tip_pts).atan2(tip_off_x);
-        Pose { rotation: aim_angle - tip_angle, rod_len, hand_pts, width, grip }
+
+        let lift = LIFT * sh * (1.0 - 0.8 * press);
+        Pose {
+            rotation: aim_angle - tip_angle,
+            rod_len,
+            hand_pts,
+            width,
+            grip,
+            lift,
+            blur: (lift * 0.35).max(1.0) + 5.0 * press,
+            opacity: 0.26 + 0.02 * press,
+        }
     }
 
     fn corners(&self, p: &Pose, sh: f32) -> [(f32, f32); 4] {
@@ -84,23 +102,29 @@ impl Arm {
 
     pub fn bbox(&self, p: &Pose, sh: f32) -> Rc {
         let c = self.corners(p, sh);
-        let pad = 6.0;
+        let pad = 6.0 + p.lift * 1.1 + p.blur * 2.0;
         let min = |f: fn(&(f32, f32)) -> f32| c.iter().map(f).fold(f32::MAX, f32::min);
         let max = |f: fn(&(f32, f32)) -> f32| c.iter().map(f).fold(f32::MIN, f32::max);
         Rc { l: (min(|c| c.0) - pad).floor() as i32, t: (min(|c| c.1) - pad).floor() as i32, r: (max(|c| c.0) + pad).ceil() as i32, b: (max(|c| c.1) + pad).ceil() as i32 }
     }
 
-    pub fn draw(&self, pix: &mut PixmapMut, p: &Pose, sh: f32) {
+    pub fn draw(&self, pix: &mut PixmapMut, p: &Pose, sh: f32, shadow: bool) {
+        let (sin, cos) = p.rotation.sin_cos();
+        let base = Transform::from_row(1.0, 0.0, 0.0, -1.0, 0.0, sh)
+            .pre_concat(Transform::from_translate(p.grip.0, p.grip.1))
+            .pre_concat(Transform::from_row(cos, sin, -sin, cos, 0.0, 0.0))
+            .pre_concat(Transform::from_translate(-self.asset.rod_x * p.width, 0.0));
+        if shadow {
+            self.draw_shadow(pix, p, base);
+        }
+        self.parts(pix, base, p);
+    }
+
+    /// base maps group-local space (origin at the rod's bottom-left, y up) to the target.
+    fn parts(&self, pix: &mut PixmapMut, base: Transform, p: &Pose) {
         let a = &self.asset;
         let img = &a.display;
         let (iw, ih) = (img.width() as f32, img.height() as f32);
-        let flip = Transform::from_row(1.0, 0.0, 0.0, -1.0, 0.0, sh);
-        let (sin, cos) = p.rotation.sin_cos();
-        let base = flip
-            .pre_concat(Transform::from_translate(p.grip.0, p.grip.1))
-            .pre_concat(Transform::from_row(cos, sin, -sin, cos, 0.0, 0.0))
-            .pre_concat(Transform::from_translate(-a.rod_x * p.width, 0.0));
-
         let mut paint = Paint::default();
         paint.shader = Pattern::new(img.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, 1.0, Transform::identity());
         paint.anti_alias = true;
@@ -118,5 +142,54 @@ impl Arm {
         if let Some(r) = Rect::from_ltrb(0.0, v_top, iw, v_wrist + 1.0) {
             pix.fill_rect(r, &paint, hand, None);
         }
+    }
+
+    /// Blurred in unrotated local space, where the buffer is small, then rotated into place.
+    fn draw_shadow(&self, pix: &mut PixmapMut, p: &Pose, base: Transform) {
+        let pad = (p.blur * 2.0).ceil() as i32 + 2;
+        let top = p.rod_len + p.hand_pts;
+        let w = (p.width.ceil() as i32 + 2 * pad) as u32;
+        let h = (top.ceil() as i32 + 2 * pad) as u32;
+        let Some(mut sil) = Pixmap::new(w, h) else { return };
+        let to_buf = Transform::from_row(1.0, 0.0, 0.0, -1.0, pad as f32, top + pad as f32);
+        self.parts(&mut sil.as_mut(), to_buf, p);
+
+        let mut alpha: Vec<u8> = sil.data().chunks_exact(4).map(|px| px[3]).collect();
+        let radius = (p.blur / 2.0).round().max(1.0) as usize;
+        box_blur(&mut alpha, w as usize, h as usize, radius);
+        for (px, a) in sil.data_mut().chunks_exact_mut(4).zip(&alpha) {
+            px.copy_from_slice(&[0, 0, 0, (*a as f32 * p.opacity) as u8]);
+        }
+
+        let offset = Transform::from_translate(p.lift * 0.6, p.lift);
+        let from_buf = Transform::from_row(1.0, 0.0, 0.0, -1.0, -pad as f32, top + pad as f32);
+        let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
+        pix.draw_pixmap(0, 0, sil.as_ref(), &paint, offset.pre_concat(base).pre_concat(from_buf), None);
+    }
+}
+
+fn pass(src: &[u8], dst: &mut [u8], lines: usize, len: usize, line_step: usize, step: usize, r: usize) {
+    let win = (2 * r + 1) as u32;
+    for l in 0..lines {
+        let b = l * line_step;
+        let mut sum: u32 = (0..=r.min(len - 1)).map(|i| src[b + i * step] as u32).sum();
+        for i in 0..len {
+            dst[b + i * step] = (sum / win) as u8;
+            if i + r + 1 < len {
+                sum += src[b + (i + r + 1) * step] as u32;
+            }
+            if i >= r {
+                sum -= src[b + (i - r) * step] as u32;
+            }
+        }
+    }
+}
+
+/// Three box passes approximate a Gaussian.
+fn box_blur(a: &mut [u8], w: usize, h: usize, r: usize) {
+    let mut tmp = vec![0u8; a.len()];
+    for _ in 0..3 {
+        pass(a, &mut tmp, h, w, w, 1, r);
+        pass(&tmp, a, w, h, 1, w, r);
     }
 }
