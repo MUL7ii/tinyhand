@@ -118,7 +118,13 @@ fn run(rx: Receiver<Cmd>) {
     }
 }
 
+/// Off until the waveOut backend is replaced: processes with it open got stuck exiting.
+const AUDIO_ENABLED: bool = false;
+
 pub fn load() {
+    if !AUDIO_ENABLED {
+        return;
+    }
     TX.get_or_init(|| {
         let (tx, rx) = channel();
         std::thread::spawn(move || run(rx));
