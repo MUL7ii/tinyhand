@@ -134,7 +134,7 @@ pub fn send_click(lp: LPARAM, button: usize) {
 /// Window thread only. Gives the app its Alt back, then the key, in order.
 pub fn send_alt_and_key(vk: usize, lp: LPARAM) {
     let (scan, extended) = ((lp.0 & 0xFFFF) as u32, (lp.0 >> 16) & 1 != 0);
-    let inputs = [key_input(VK_MENU.0 as u32, 0, false), key_input(vk as u32, scan, extended)];
+    let inputs = [key_input(crate::config::interact_keys().1, 0, false), key_input(vk as u32, scan, extended)];
     unsafe {
         SendInput(&inputs, size_of::<INPUT>() as i32);
     }
@@ -182,7 +182,7 @@ unsafe extern "system" fn key_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
         if k.flags.0 & LLKHF_INJECTED.0 == 0 {
             let msg = wp.0 as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-            let is_alt = [VK_LMENU, VK_RMENU, VK_MENU].iter().any(|v| v.0 as u32 == k.vkCode);
+            let is_alt = crate::config::interact_keys().0.contains(&k.vkCode);
             if is_alt && down && !PASSED.load(Relaxed) {
                 if !INTERACT.swap(true, Relaxed) {
                     post_interact(true);

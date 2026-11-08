@@ -20,7 +20,10 @@ enum Cmd {
     Open,
     Close,
     Play,
+    Preview(usize),
 }
+
+const PREVIEW_LINGER: Duration = Duration::from_millis(1500);
 
 static TX: OnceLock<Sender<Cmd>> = OnceLock::new();
 static CHOICE: AtomicUsize = AtomicUsize::new(0);
@@ -175,6 +178,22 @@ fn run(rx: Receiver<Cmd>) {
                     s.start();
                 }
             }
+            Some(Cmd::Preview(i)) => {
+                // Settings can preview a sound while the pointer is off.
+                if stream.is_none() {
+                    match Stream::open() {
+                        Ok(s) => stream = Some(s),
+                        Err(e) => crate::log::write(&format!("audio open failed: {e}")),
+                    }
+                }
+                if clips.get(i).is_some_and(|c| !c.is_empty()) {
+                    voice = Some((i, 0));
+                }
+                last_tap = Instant::now();
+                if let Some(s) = &mut stream {
+                    s.start();
+                }
+            }
             _ => {}
         }
         if let Some(s) = &mut stream {
@@ -183,6 +202,11 @@ fn run(rx: Receiver<Cmd>) {
                 if voice.is_none() && last_tap.elapsed() > STOP_AFTER_IDLE {
                     s.stop();
                 }
+            }
+        }
+        if !wanted && voice.is_none() && last_tap.elapsed() > PREVIEW_LINGER {
+            if let Some(mut s) = stream.take() {
+                s.stop();
             }
         }
     }
@@ -209,6 +233,13 @@ pub fn set_enabled(on: bool) {
 pub fn set_choice(name: &str) {
     if let Some(i) = CHOICES.iter().position(|c| *c == name) {
         CHOICE.store(i, Relaxed);
+    }
+}
+
+/// Plays one sound once, for the settings page.
+pub fn preview(name: &str) {
+    if let Some(i) = CHOICES.iter().position(|c| *c == name) {
+        send(Cmd::Preview(i));
     }
 }
 

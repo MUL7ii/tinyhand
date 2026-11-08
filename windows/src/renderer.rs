@@ -16,8 +16,6 @@ use crate::toolbar::{WM_SCREEN_CHANGED, WM_TB_WANT};
 use crate::surface::Surface;
 
 const DRAG_THRESHOLD: f32 = 4.0;
-const POINTER_SIZE: f32 = 0.13;
-const SHADOW: bool = true;
 const TICK_HZ: f32 = 120.0;
 
 pub enum Next {
@@ -30,6 +28,7 @@ pub struct Renderer {
     surface: Surface,
     ink: Ink,
     style: Style,
+    style_ink: u32,
     cursor: (f32, f32),
     key: Vec<i32>,
     shape: Option<Rc>,
@@ -62,12 +61,13 @@ fn monitor_rect(at: (f32, f32)) -> RECT {
 impl Renderer {
     pub fn new(hwnd: HWND, w: i32, h: i32, style: Style, ink_rgb: u32) -> Self {
         let mut ink = Ink::new(w, h);
-        ink.set_color(ink_rgb);
+        ink.set_color(crate::config::ink_override().unwrap_or(ink_rgb));
         Self {
             hwnd,
             surface: Surface::new(w, h),
             ink,
             style,
+            style_ink: ink_rgb,
             cursor: (0.0, 0.0),
             key: vec![],
             shape: None,
@@ -101,7 +101,13 @@ impl Renderer {
 
     pub fn set_style(&mut self, style: Style, ink_rgb: u32) {
         self.style = style;
-        self.ink.set_color(ink_rgb);
+        self.style_ink = ink_rgb;
+        self.refresh();
+    }
+
+    /// Picks up changed settings: ink color, pointer size, shadow.
+    pub fn refresh(&mut self) {
+        self.ink.set_color(crate::config::ink_override().unwrap_or(self.style_ink));
         self.key.clear();
     }
 
@@ -210,7 +216,7 @@ impl Renderer {
         let mut pose = None;
         let (key, shape, settling) = match &mut self.style {
             Style::Hand(arm) => {
-                let p = arm.aim(at, screen, self.press, POINTER_SIZE, dt);
+                let p = arm.aim(at, screen, self.press, crate::config::pointer_size(), dt);
                 pose = Some(p);
                 (p.key(), arm.bbox(&p, screen.1), arm.settling())
             }
@@ -248,7 +254,7 @@ impl Renderer {
         }
         if let Some(mut pix) = PixmapMut::from_bytes(self.surface.bytes_mut(), w as u32, h as u32) {
             match (&self.style, pose) {
-                (Style::Hand(arm), Some(p)) => arm.draw(&mut pix, &p, screen.1, SHADOW),
+                (Style::Hand(arm), Some(p)) => arm.draw(&mut pix, &p, screen.1, crate::config::shadow()),
                 _ => draw_laser(&mut pix, at, laser_radius(screen.1, self.press)),
             }
         }

@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 use tiny_skia::*;
 
-const FADE_DELAY: f32 = 3.0;
 const FADE_FOR: f32 = 0.6;
 
 /// Every buffer here is BGRA, so colours swap red and blue.
@@ -48,11 +47,14 @@ impl Stroke {
     }
 
     fn alpha(&self) -> f32 {
-        self.age().map_or(1.0, |a| 1.0 - ((a - FADE_DELAY) / FADE_FOR).clamp(0.0, 1.0))
+        match (self.age(), crate::config::fade_delay()) {
+            (Some(a), Some(delay)) => 1.0 - ((a - delay) / FADE_FOR).clamp(0.0, 1.0),
+            _ => 1.0,
+        }
     }
 
     fn fading(&self) -> bool {
-        self.age().is_some_and(|a| a > FADE_DELAY)
+        matches!((self.age(), crate::config::fade_delay()), (Some(a), Some(delay)) if a > delay)
     }
 
     fn path(&self) -> Option<Path> {
@@ -206,13 +208,14 @@ impl Ink {
     }
 
     pub fn pending(&self) -> Pending {
+        let Some(delay) = crate::config::fade_delay() else { return Pending::Nothing };
         if self.strokes.iter().any(Stroke::fading) {
             return Pending::Fading;
         }
         self.strokes
             .iter()
             .filter_map(Stroke::age)
-            .map(|a| Duration::from_secs_f32((FADE_DELAY - a).max(0.0)))
+            .map(|a| Duration::from_secs_f32((delay - a).max(0.0)))
             .min()
             .map_or(Pending::Nothing, Pending::After)
     }

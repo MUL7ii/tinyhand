@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod arm;
+mod config;
 mod cursor;
 mod hand;
 mod hook;
@@ -392,7 +393,8 @@ impl App {
             s.focus();
             return;
         }
-        // Settings is a normal window, so the pointer steps aside while it is open.
+        // Settings is an ordinary window, so the pointer turns off first, as on the Mac.
+        self.deactivate();
         self.settings = settings::SettingsWindow::open(|message| {
             APP.with(|c| {
                 if let Some(app) = c.try_borrow_mut().ok().as_mut().and_then(|s| s.as_mut()) {
@@ -406,8 +408,56 @@ impl App {
         self.settings = None;
     }
 
+    fn push_settings(&self) {
+        if let Some(s) = &self.settings {
+            s.send(&format!("window.__state({})", config::snapshot()));
+        }
+    }
+
     fn on_settings_message(&mut self, message: &str) {
-        log::write(&format!("settings message: {message}"));
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(message) else { return };
+        match msg["type"].as_str() {
+            Some("get") => self.push_settings(),
+            Some("set") => self.set_setting(msg["key"].as_str().unwrap_or(""), &msg["value"]),
+            Some("preview_sound") => sound::preview(msg["name"].as_str().unwrap_or("")),
+            Some("open_url") => open_url(msg["url"].as_str().unwrap_or("")),
+            Some("reset") => {
+                config::reset();
+                sound::set_choice(&prefs::tap_sound());
+                self.refresh_sound();
+                lock(&self.renderer).refresh();
+                self.push_settings();
+            }
+            _ => {}
+        }
+    }
+
+    fn set_setting(&mut self, key: &str, value: &serde_json::Value) {
+        match key {
+            "tap_sound" => {
+                let name = value.as_str().unwrap_or("thock");
+                if sound::CHOICES.contains(&name) {
+                    prefs::set_str("tap_sound", name);
+                    sound::set_choice(name);
+                    sound::preview(name);
+                }
+            }
+            "sound_hands" | "sound_laser" => {
+                prefs::set_flag(key, value.as_bool().unwrap_or(false));
+                self.refresh_sound();
+            }
+            "click_through" => {
+                if value.as_bool().unwrap_or(false) != hook::CLICK_THROUGH.load(Relaxed) {
+                    self.toggle_click_through();
+                }
+            }
+            _ => {
+                if config::set(key, value) {
+                    lock(&self.renderer).refresh();
+                    hook::wake();
+                }
+            }
+        }
     }
 
     /// The full-screen overlay must never hold keyboard focus. When Windows hands it over
@@ -429,6 +479,18 @@ impl App {
                 next = GetWindow(w, GW_HWNDNEXT).ok();
             }
         }
+    }
+}
+
+/// Opens a link in the default browser. Only TinyHand's own sites, never arbitrary input.
+fn open_url(url: &str) {
+    let allowed = ["https://github.com/nilbuild/", "https://github.com/MUL7ii/", "https://tinyhand.app", "https://kamran.fyi"];
+    if !allowed.iter().any(|p| url.starts_with(p)) {
+        return;
+    }
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
     }
 }
 
@@ -602,6 +664,7 @@ fn main() {
         let tray = CreateWindowExW(WS_EX_TOOLWINDOW, tray_class, w!("TinyHand tray"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None).expect("tray window");
         HWND_RAW.store(tray.0 as isize, Relaxed);
 
+        config::load();
         let id = std::env::args().nth(1).or_else(prefs::load_style).unwrap_or_else(|| "lavender".into());
         let (style, ink) = styles::load(&id);
         let mut pinned = PINNED.to_vec();
