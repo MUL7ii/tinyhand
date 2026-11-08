@@ -9,6 +9,7 @@ mod monitor;
 mod prefs;
 mod renderer;
 mod scene;
+mod settings;
 mod sound;
 mod styles;
 mod surface;
@@ -21,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
+use windows::Win32::Graphics::Gdi::{COLOR_WINDOW, GetSysColorBrush};
 use windows::Win32::Media::timeBeginPeriod;
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, SetConsoleCtrlHandler};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -44,6 +46,7 @@ const WM_TRAY: u32 = WM_APP + 10;
 const CMD_TOGGLE: usize = 1;
 const CMD_QUIT: usize = 2;
 const CMD_THROUGH: usize = 3;
+const CMD_SETTINGS: usize = 4;
 
 static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 
@@ -64,6 +67,7 @@ struct App {
     /// The toolbar shows for a few seconds after turning on.
     initial: bool,
     style_id: String,
+    settings: Option<settings::SettingsWindow>,
 }
 
 const YIELD_TO: [&str; 3] = ["screenclippinghost.exe", "snippingtool.exe", "screensketch.exe"];
@@ -294,6 +298,14 @@ impl App {
             self.give_back_focus(HWND(lp.0 as *mut c_void));
             return Some(LRESULT(0));
         }
+        if self.settings.as_ref().is_some_and(|s| s.hwnd == hwnd) {
+            match msg {
+                WM_SIZE => self.settings.as_ref()?.resize(),
+                WM_CLOSE => self.close_settings(),
+                _ => return None,
+            }
+            return Some(LRESULT(0));
+        }
         if hwnd == self.toolbar.hwnd {
             let (result, action) = self.toolbar.handle(msg, wp, lp)?;
             match action {
@@ -369,9 +381,33 @@ impl App {
         match cmd {
             CMD_TOGGLE => self.toggle(),
             CMD_THROUGH => self.toggle_click_through(),
+            CMD_SETTINGS => self.open_settings(),
             CMD_QUIT => unsafe { PostQuitMessage(0) },
             _ => {}
         }
+    }
+
+    fn open_settings(&mut self) {
+        if let Some(s) = &self.settings {
+            s.focus();
+            return;
+        }
+        // Settings is a normal window, so the pointer steps aside while it is open.
+        self.settings = settings::SettingsWindow::open(|message| {
+            APP.with(|c| {
+                if let Some(app) = c.try_borrow_mut().ok().as_mut().and_then(|s| s.as_mut()) {
+                    app.on_settings_message(&message);
+                }
+            });
+        });
+    }
+
+    fn close_settings(&mut self) {
+        self.settings = None;
+    }
+
+    fn on_settings_message(&mut self, message: &str) {
+        log::write(&format!("settings message: {message}"));
     }
 
     /// The full-screen overlay must never hold keyboard focus. When Windows hands it over
@@ -406,6 +442,7 @@ fn show_tray_menu(tray: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, CMD_TOGGLE, label);
         let checked = if hook::CLICK_THROUGH.load(Relaxed) { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, MF_STRING | checked, CMD_THROUGH, w!("Click through\tCtrl+Alt+C"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, w!("Settings…"));
         let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit TinyHand"));
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);
@@ -543,6 +580,16 @@ fn main() {
         .expect("toolbar window");
         let _ = DwmSetWindowAttribute(bar, DWMWA_TRANSITIONS_FORCEDISABLED, (&raw const off).cast(), size_of::<BOOL>() as u32);
 
+        RegisterClassExW(&WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinst,
+            lpszClassName: settings::CLASS,
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: GetSysColorBrush(COLOR_WINDOW),
+            ..Default::default()
+        });
+
         // The tray icon and its menu get their own tiny window, so the overlay never takes focus.
         let tray_class = w!("TinyHandTray");
         RegisterClassExW(&WNDCLASSEXW {
@@ -568,7 +615,7 @@ fn main() {
         sound::load();
         sound::set_choice(&prefs::tap_sound());
         let renderer = Arc::new(Mutex::new(Renderer::new(hwnd, w, h, style, ink)));
-        let mut app = App { hwnd, renderer: renderer.clone(), toolbar, active: false, suspended: false, near: false, initial: false, style_id: id.clone() };
+        let mut app = App { hwnd, renderer: renderer.clone(), toolbar, active: false, suspended: false, near: false, initial: false, style_id: id.clone(), settings: None };
         app.refresh_sound();
         APP.with(|a| *a.borrow_mut() = Some(app));
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT);
