@@ -120,6 +120,26 @@ impl Toolbar {
         bar
     }
 
+    /// Replaces the pointer buttons, keeping icons already loaded.
+    pub fn set_styles(&mut self, styles: &[String]) {
+        let mut old = std::mem::take(&mut self.items);
+        let mut items: Vec<Item> = styles
+            .iter()
+            .map(|id| {
+                let kept = old.iter_mut().find(|i| matches!(&i.kind, Kind::Style(x) if x == id)).and_then(|i| i.source.take());
+                let source = kept.or_else(|| HandAsset::load(id).map(|a| a.thumbnail(SOURCE_PX)));
+                Item { kind: Kind::Style(id.clone()), source, icon: None, x: 0.0 }
+            })
+            .collect();
+        for kind in [Kind::ClickThrough, Kind::Sound, Kind::Exit] {
+            items.push(Item { kind, source: None, icon: None, x: 0.0 });
+        }
+        self.items = items;
+        self.layout(self.scale);
+        self.place();
+        self.paint();
+    }
+
     /// Sizes and positions everything for a display scaling. Called again when the toolbar
     /// moves to a monitor with a different one.
     fn layout(&mut self, scale: f32) {

@@ -106,6 +106,32 @@
   .btn:hover { background: var(--line); }
   .kbd { display: inline-flex; gap: 4px; flex: none; }
   .kbd kbd { font: 600 12px "Segoe UI", sans-serif; padding: 3px 8px; border-radius: 6px; background: var(--hover); border: 1px solid var(--line); border-bottom-width: 2px; }
+  .strip-head { display: flex; justify-content: space-between; align-items: baseline; padding: 14px 16px 0; }
+  .strip-head span { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .strip { display: flex; gap: 6px; padding: 14px 16px 6px; min-height: 100px; }
+  .slot { position: relative; width: 52px; flex: none; }
+  .slot.dragging { opacity: 0.4; }
+  .slot.over .slotbtn { outline: 2px dashed var(--accent); outline-offset: 2px; }
+  .slotbtn { all: unset; box-sizing: border-box; width: 52px; height: 52px; border-radius: 11px; background: var(--hover); display: grid; place-items: center; cursor: pointer; border: 2px solid transparent; }
+  .slotbtn[aria-pressed="true"] { border-color: var(--accent); background: var(--card); }
+  .slotbtn img { width: 40px; height: 40px; object-fit: contain; pointer-events: none; }
+  .x { all: unset; position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%; background: var(--text); color: var(--card); font-size: 13px; line-height: 18px; text-align: center; cursor: pointer; opacity: 0; transition: opacity .12s; }
+  .slot:hover .x, .x:focus-visible { opacity: 1; }
+  .move { display: flex; justify-content: space-between; margin-top: 4px; }
+  .move button { all: unset; width: 24px; height: 20px; border-radius: 6px; text-align: center; line-height: 20px; cursor: pointer; color: var(--muted); }
+  .move button:hover:not([disabled]) { background: var(--hover); color: var(--text); }
+  .move button[disabled] { opacity: 0.25; cursor: default; }
+  .move button:focus-visible { outline: 2px solid var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 12px; }
+  .cell { all: unset; box-sizing: border-box; position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px 8px; border-radius: 10px; cursor: pointer; border: 2px solid transparent; font-size: 12.5px; text-align: center; }
+  .cell:hover { background: var(--hover); }
+  .cell[aria-pressed="true"] { border-color: var(--accent); background: var(--hover); }
+  .cell img, .cell .ph { width: 56px; height: 56px; object-fit: contain; }
+  .cell .ph { border-radius: 10px; background: var(--hover); }
+  .badge { position: absolute; top: 6px; right: 8px; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); font-style: normal; font-size: 11px; line-height: 18px; text-align: center; display: none; }
+  .cell[aria-pressed="true"] .badge { display: block; }
+  .laser { width: 20px; height: 20px; border-radius: 50%; background: radial-gradient(circle, #ffdcd1 0 28%, #ff291f 30% 60%, rgba(255, 41, 31, 0.0) 100%); box-shadow: 0 0 14px 6px rgba(255, 41, 31, 0.45); display: inline-block; }
+  #notice { min-height: 20px; padding: 0 16px 12px; color: #d9453a; font-size: 12.5px; }
   .about { text-align: center; padding: 28px 16px; }
   .about .logo { width: 84px; height: 84px; margin: 0 auto 12px; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.28)); }
   .about h2 { margin: 0; font-size: 20px; }
@@ -127,9 +153,11 @@ const ICONS = {
   sound: '<svg viewBox="0 0 24 24"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>',
   about: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>',
 };
+ICONS.pointers = '<svg viewBox="0 0 24 24"><path d="M9 11V5a1.5 1.5 0 0 1 3 0v5.5"/><path d="M12 10.5a1.5 1.5 0 0 1 3 0V12"/><path d="M15 11.5a1.5 1.5 0 0 1 3 0V16a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7L3.5 15a1.5 1.5 0 0 1 2.4-1.8L9 16"/></svg>';
 const SECTIONS = [
-  ['general', 'General'], ['appearance', 'Appearance'], ['drawing', 'Drawing'], ['sound', 'Sound'], ['about', 'About'],
+  ['general', 'General'], ['pointers', 'Pointers'], ['appearance', 'Appearance'], ['drawing', 'Drawing'], ['sound', 'Sound'], ['about', 'About'],
 ];
+const DEFAULT_PINNED = ['lavender', 'glove', 'coral', 'plush', 'robot', 'laser'];
 const FADES = [[0, 'Never'], [1, '1 s'], [3, '3 s'], [5, '5 s'], [10, '10 s']];
 const INKS = [['match', 'Match the pointer'], ['red', 'Red'], ['orange', 'Orange'], ['yellow', 'Yellow'], ['green', 'Green'], ['blue', 'Blue'], ['purple', 'Purple'], ['white', 'White'], ['black', 'Black']];
 const INK_CSS = { red: '#ff291f', orange: '#ff8a00', yellow: '#ffcc00', green: '#30c25a', blue: '#0a84ff', purple: '#8754f2', white: '#ffffff', black: '#1d1d21' };
@@ -138,6 +166,13 @@ const INTERACT = [['alt', 'Alt'], ['ctrl', 'Ctrl'], ['shift', 'Shift'], ['off', 
 
 let S = null;
 let page = 'general';
+let THUMBS = {};
+let notice = '';
+let noticeTimer = 0;
+let thumbRetries = 0;
+
+const nameOf = (id) => (S.hands.find((h) => h.id === id) || { title: id }).title;
+const picture = (id) => id === 'laser' ? '<span class="laser"></span>' : (THUMBS[id] ? `<img src="${THUMBS[id]}" alt="">` : '<span class="ph"></span>');
 
 const send = (m) => window.ipc.postMessage(JSON.stringify(m));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -167,6 +202,29 @@ const PAGES = {
     </div>
     <div class="card">
       ${row('Reset all settings', 'Puts every setting back to how it was at first.', '<button class="btn" data-action="reset">Reset</button>')}
+    </div>`,
+
+  pointers: () => `
+    <div class="card">
+      <div class="strip-head"><b>Toolbar</b><span>${S.pinned.length} of ${S.max_pinned}</span></div>
+      <div class="strip" id="strip">${S.pinned.map((id, i) => `
+        <div class="slot" draggable="true" data-slot="${i}">
+          <button class="slotbtn" aria-pressed="${S.style === id}" data-pick="${id}" title="${esc(nameOf(id))}. Click to use it." aria-label="Use ${esc(nameOf(id))}">${picture(id)}</button>
+          <button class="x" aria-label="Remove ${esc(nameOf(id))} from the toolbar" data-pin="${id}">&times;</button>
+          <div class="move">
+            <button aria-label="Move ${esc(nameOf(id))} left" data-move="${i}" data-by="-1" ${i === 0 ? 'disabled' : ''}>&lsaquo;</button>
+            <button aria-label="Move ${esc(nameOf(id))} right" data-move="${i}" data-by="1" ${i === S.pinned.length - 1 ? 'disabled' : ''}>&rsaquo;</button>
+          </div>
+        </div>`).join('')}</div>
+      <div id="notice" role="status">${esc(notice)}</div>
+    </div>
+    <p class="hint">Click a pointer to use it. Use the arrows or drag to reorder. Your current pointer always shows on the toolbar.</p>
+    <div class="card"><div class="grid">${S.hands.map((h) => `
+      <button class="cell" aria-pressed="${S.pinned.includes(h.id)}" data-pin="${h.id}" title="${S.pinned.includes(h.id) ? 'Remove from' : 'Add to'} the toolbar">
+        ${picture(h.id)}<span>${esc(h.title)}</span><i class="badge">&#10003;</i>
+      </button>`).join('')}</div></div>
+    <div class="card">
+      ${row('Reset the toolbar', 'Go back to the original set of pointers.', '<button class="btn" data-action="reset-toolbar">Reset</button>')}
     </div>`,
 
   appearance: () => `
@@ -218,9 +276,22 @@ function render() {
 const $ = (s) => document.querySelector(s);
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-page],[data-toggle],[data-set],[data-sound],[data-action],[data-url]');
+  const t = e.target.closest('[data-page],[data-toggle],[data-set],[data-sound],[data-action],[data-url],[data-pin],[data-pick],[data-move]');
   if (!t || !S) return;
   if (t.dataset.page) { page = t.dataset.page; render(); $('#page').scrollTop = 0; }
+  else if (t.dataset.move !== undefined) {
+    const from = Number(t.dataset.move), to = from + Number(t.dataset.by);
+    if (to >= 0 && to < S.pinned.length) {
+      const list = S.pinned.slice();
+      list.splice(to, 0, list.splice(from, 1)[0]);
+      S.pinned = list;
+      send({ type: 'reorder', ids: list });
+      render();
+    }
+  }
+  else if (t.dataset.pin) send({ type: 'pin', id: t.dataset.pin });
+  else if (t.dataset.pick) send({ type: 'pick', id: t.dataset.pick });
+  else if (t.dataset.action === 'reset-toolbar') send({ type: 'reorder', ids: DEFAULT_PINNED });
   else if (t.dataset.toggle) set(t.dataset.toggle, !S[t.dataset.toggle]);
   else if (t.dataset.set) set(t.dataset.set, JSON.parse(t.dataset.value));
   else if (t.dataset.sound) { S.tap_sound = t.dataset.sound; send({ type: 'set', key: 'tap_sound', value: t.dataset.sound }); render(); }
@@ -239,7 +310,52 @@ document.addEventListener('input', (e) => {
   pending = setTimeout(() => send({ type: 'set', key, value }), 30);
 });
 
+// Reordering the toolbar by dragging.
+let dragFrom = -1;
+document.addEventListener('dragstart', (e) => {
+  const slot = e.target.closest && e.target.closest('.slot');
+  if (!slot) return;
+  dragFrom = Number(slot.dataset.slot);
+  slot.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', String(dragFrom));
+});
+document.addEventListener('dragover', (e) => {
+  const slot = e.target.closest && e.target.closest('.slot');
+  if (!slot || dragFrom < 0) return;
+  e.preventDefault();
+  document.querySelectorAll('.slot.over').forEach((s) => s.classList.remove('over'));
+  slot.classList.add('over');
+});
+document.addEventListener('drop', (e) => {
+  const slot = e.target.closest && e.target.closest('.slot');
+  if (!slot || dragFrom < 0) return;
+  e.preventDefault();
+  const to = Number(slot.dataset.slot);
+  if (to !== dragFrom) {
+    const list = S.pinned.slice();
+    list.splice(to, 0, list.splice(dragFrom, 1)[0]);
+    S.pinned = list;
+    send({ type: 'reorder', ids: list });
+  }
+  dragFrom = -1;
+  render();
+});
+document.addEventListener('dragend', () => { dragFrom = -1; document.querySelectorAll('.slot.dragging,.slot.over').forEach((s) => s.classList.remove('dragging', 'over')); });
+
 window.__state = (state) => { S = state; render(); };
+window.__thumbs = (t) => {
+  THUMBS = t;
+  if (page === 'pointers') render();
+  // They are built in the background after launch. Ask again until they are all here.
+  if (S && Object.keys(t).length < S.hands.length - 1 && thumbRetries++ < 12) setTimeout(() => send({ type: 'thumbs' }), 700);
+};
+window.__notice = (text) => {
+  notice = text;
+  if (page === 'pointers') render();
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { notice = ''; if (page === 'pointers') render(); }, 3500);
+};
 send({ type: 'get' });
 </script>
 </body>

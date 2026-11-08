@@ -56,6 +56,28 @@ pub fn interact_keys() -> (&'static [u32], u32) {
     }
 }
 
+pub const MAX_PINNED: usize = 8;
+const DEFAULT_PINNED: [&str; 6] = ["lavender", "glove", "coral", "plush", "robot", "laser"];
+
+/// The pointers shown on the toolbar, in order. Never empty, never unknown, never repeated.
+pub fn pinned() -> Vec<String> {
+    let saved = prefs::get_str("pinned").unwrap_or_default();
+    let mut list: Vec<String> = Vec::new();
+    for id in saved.split(',').map(str::trim) {
+        if crate::styles::is_known(id) && !list.iter().any(|x| x == id) && list.len() < MAX_PINNED {
+            list.push(id.to_string());
+        }
+    }
+    if list.is_empty() {
+        list = DEFAULT_PINNED.iter().map(|s| s.to_string()).collect();
+    }
+    list
+}
+
+pub fn set_pinned(list: &[String]) {
+    prefs::set_str("pinned", &list.join(","));
+}
+
 pub fn load() {
     let size = prefs::get_f32("pointer_size").unwrap_or(DEFAULT_SIZE).clamp(SIZE_RANGE.0, SIZE_RANGE.1);
     SIZE.store(size.to_bits(), Relaxed);
@@ -110,7 +132,7 @@ pub fn set(key: &str, value: &Value) -> bool {
 }
 
 pub fn reset() {
-    for key in ["pointer_size", "shadow", "fade_seconds", "ink_choice", "show_ink_button", "interact_key", "tap_sound", "sound_hands", "sound_laser"] {
+    for key in ["pointer_size", "shadow", "fade_seconds", "ink_choice", "show_ink_button", "interact_key", "tap_sound", "sound_hands", "sound_laser", "pinned"] {
         prefs::remove(key);
     }
     load();

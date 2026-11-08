@@ -15,6 +15,7 @@ mod settings;
 mod sound;
 mod styles;
 mod surface;
+mod thumbs;
 mod toolbar;
 
 use std::cell::RefCell;
@@ -55,7 +56,6 @@ static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 const TIMER_INITIAL: usize = 3;
 const TIMER_RAISE: usize = 4;
 const TIMER_POPUPS: usize = 5;
-const PINNED: [&str; 6] = ["lavender", "glove", "coral", "plush", "robot", "laser"];
 
 struct App {
     hwnd: HWND,
@@ -244,9 +244,15 @@ impl App {
     fn pick(&mut self, id: &str) {
         let (style, ink) = styles::load(id);
         lock(&self.renderer).set_style(style, ink);
-        self.toolbar.select(id);
         prefs::save_style(id);
+        let pinned = config::pinned();
+        let rebuild = !pinned.iter().any(|p| *p == self.style_id) || !pinned.iter().any(|p| p == id);
         self.style_id = id.to_string();
+        if rebuild {
+            let list = self.toolbar_styles();
+            self.toolbar.set_styles(&list);
+        }
+        self.toolbar.select(id);
         self.refresh_sound();
         hook::wake();
     }
@@ -409,16 +415,86 @@ impl App {
         self.settings = None;
     }
 
+    /// The pinned pointers, plus the current one if it is not pinned, as on the Mac.
+    fn toolbar_styles(&self) -> Vec<String> {
+        let mut list = config::pinned();
+        if !list.contains(&self.style_id) {
+            list.push(self.style_id.clone());
+        }
+        list
+    }
+
     fn push_settings(&self) {
+        let Some(s) = &self.settings else { return };
+        let mut state = config::snapshot();
+        state["style"] = serde_json::json!(self.style_id);
+        state["pinned"] = serde_json::json!(config::pinned());
+        state["max_pinned"] = serde_json::json!(config::MAX_PINNED);
+        state["hands"] = serde_json::Value::Array(styles::all().map(|(id, title)| serde_json::json!({ "id": id, "title": title })).collect());
+        s.send(&format!("window.__state({state})"));
+        s.send(&format!("window.__thumbs({})", serde_json::json!(thumbs::all())));
+    }
+
+    fn notice(&self, text: &str) {
         if let Some(s) = &self.settings {
-            s.send(&format!("window.__state({})", config::snapshot()));
+            s.send(&format!("window.__notice({})", serde_json::json!(text)));
+        }
+    }
+
+    fn apply_pinned(&mut self) {
+        let list = self.toolbar_styles();
+        self.toolbar.set_styles(&list);
+        self.toolbar.select(&self.style_id.clone());
+        self.push_settings();
+    }
+
+    fn pin(&mut self, id: &str) {
+        let mut list = config::pinned();
+        if let Some(at) = list.iter().position(|x| x == id) {
+            if list.len() == 1 {
+                return self.notice("Keep at least one pointer in the toolbar.");
+            }
+            list.remove(at);
+        } else if !styles::is_known(id) {
+            return;
+        } else if list.len() >= config::MAX_PINNED {
+            return self.notice("The toolbar is full. Remove one first.");
+        } else {
+            list.push(id.to_string());
+        }
+        config::set_pinned(&list);
+        self.apply_pinned();
+    }
+
+    fn reorder(&mut self, ids: &[String]) {
+        let mut list: Vec<String> = Vec::new();
+        for id in ids {
+            if styles::is_known(id) && !list.contains(id) && list.len() < config::MAX_PINNED {
+                list.push(id.clone());
+            }
+        }
+        if !list.is_empty() {
+            config::set_pinned(&list);
+            self.apply_pinned();
         }
     }
 
     fn on_settings_message(&mut self, message: &str) {
         let Ok(msg) = serde_json::from_str::<serde_json::Value>(message) else { return };
         match msg["type"].as_str() {
-            Some("get") => self.push_settings(),
+            Some("get") | Some("thumbs") => self.push_settings(),
+            Some("pin") => self.pin(msg["id"].as_str().unwrap_or("")),
+            Some("reorder") => {
+                let ids: Vec<String> = msg["ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+                self.reorder(&ids);
+            }
+            Some("pick") => {
+                let id = msg["id"].as_str().unwrap_or("").to_string();
+                if styles::is_known(&id) {
+                    self.pick(&id);
+                    self.push_settings();
+                }
+            }
             Some("set") => self.set_setting(msg["key"].as_str().unwrap_or(""), &msg["value"]),
             Some("preview_sound") => sound::preview(msg["name"].as_str().unwrap_or("")),
             Some("open_url") => open_url(msg["url"].as_str().unwrap_or("")),
@@ -668,11 +744,13 @@ fn main() {
         config::load();
         let id = std::env::args().nth(1).or_else(prefs::load_style).unwrap_or_else(|| "lavender".into());
         let (style, ink) = styles::load(&id);
-        let mut pinned = PINNED.to_vec();
-        if !pinned.contains(&id.as_str()) {
-            pinned.insert(pinned.len() - 1, &id);
+        let mut shown = config::pinned();
+        if !shown.contains(&id) {
+            shown.push(id.clone());
         }
-        let mut toolbar = Toolbar::new(bar, &pinned, &id);
+        let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
+        let mut toolbar = Toolbar::new(bar, &shown, &id);
+        thumbs::build_in_background();
         let through = prefs::flag("click_through", false);
         hook::CLICK_THROUGH.store(through, Relaxed);
         toolbar.set_click_through(through);
