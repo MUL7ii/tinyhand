@@ -94,6 +94,12 @@ impl App {
     fn on_message(&mut self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_TIMER => self.refresh_taskbar(),
+            hook::WM_PRESENT => {
+                hook::PRESENT_PENDING.store(false, Relaxed);
+                if self.active {
+                    lock(&self.renderer).present();
+                }
+            }
             WM_HOTKEY => match wp.0 as i32 {
                 HK_TOGGLE => self.toggle(),
                 HK_CLEAR => {

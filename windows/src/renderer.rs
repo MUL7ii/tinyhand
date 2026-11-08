@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -6,7 +7,7 @@ use tiny_skia::PixmapMut;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::System::Threading::*;
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW};
 
 use crate::hook;
 use crate::scene::{Ink, Pending, Rc, draw_laser, union_opt};
@@ -31,6 +32,7 @@ pub struct Renderer {
     down_seq: u32,
     up_seq: u32,
     last: Instant,
+    drew: bool,
 }
 
 // The raw HWND and DIB pointer are only used behind the mutex.
@@ -58,6 +60,7 @@ impl Renderer {
             down_seq: 0,
             up_seq: 0,
             last: Instant::now(),
+            drew: false,
         }
     }
 
@@ -161,7 +164,15 @@ impl Renderer {
         if let Some(mut pix) = PixmapMut::from_bytes(self.surface.bytes_mut(), w as u32, h as u32) {
             draw_laser(&mut pix, at, r);
         }
+        self.drew = true;
+    }
+
+    pub fn present(&self) {
         self.surface.present(self.hwnd);
+    }
+
+    pub fn hwnd_raw(&self) -> isize {
+        self.hwnd.0 as isize
     }
 }
 
@@ -180,7 +191,16 @@ pub fn run(shared: Arc<Mutex<Renderer>>) {
             hook::wait(INFINITE);
             continue;
         }
-        let next = lock(&shared).frame();
+        let (next, drew, hwnd) = {
+            let mut r = lock(&shared);
+            let next = r.frame();
+            (next, std::mem::take(&mut r.drew), r.hwnd_raw())
+        };
+        if drew && !hook::PRESENT_PENDING.swap(true, Relaxed) {
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd as *mut c_void)), hook::WM_PRESENT, WPARAM(0), LPARAM(0));
+            }
+        }
         match next {
             Next::Frame => unsafe {
                 let _ = DwmFlush();

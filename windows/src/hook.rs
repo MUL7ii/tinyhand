@@ -7,6 +7,9 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
+/// The window thread does the actual present.
+pub const WM_PRESENT: u32 = WM_APP + 3;
+pub static PRESENT_PENDING: AtomicBool = AtomicBool::new(false);
 pub static ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static HELD: AtomicBool = AtomicBool::new(false);
 /// Set by the render thread while it sleeps. The hook wakes it on mouse moves.

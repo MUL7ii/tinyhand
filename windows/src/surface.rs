@@ -50,21 +50,18 @@ impl Surface {
         BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 }
     }
 
-    /// Sets position and size as well. Window thread only.
+    /// Window thread only.
     pub fn present_full(&self, hwnd: HWND) {
         let origin = POINT::default();
         let size = SIZE { cx: self.w, cy: self.h };
         unsafe {
-            let _ = UpdateLayeredWindow(hwnd, None, Some(&origin), Some(&size), Some(self.dc), Some(&origin), COLORREF(0), Some(&Self::blend()), ULW_ALPHA);
+            if let Err(e) = UpdateLayeredWindow(hwnd, None, Some(&origin), Some(&size), Some(self.dc), Some(&origin), COLORREF(0), Some(&Self::blend()), ULW_ALPHA) {
+                eprintln!("ulw failed: {e}");
+            }
         }
     }
 
-    /// Content only (no move or resize), so it is safe from any thread.
-    /// prcDirty via UpdateLayeredWindowIndirect did not update the screen here.
     pub fn present(&self, hwnd: HWND) {
-        let origin = POINT::default();
-        unsafe {
-            let _ = UpdateLayeredWindow(hwnd, None, None, None, Some(self.dc), Some(&origin), COLORREF(0), Some(&Self::blend()), ULW_ALPHA);
-        }
+        self.present_full(hwnd);
     }
 }
